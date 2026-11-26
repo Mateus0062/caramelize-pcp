@@ -15,7 +15,7 @@ const schema = z.object({
 
 export const GET = apiRoute({}, async () => NextResponse.json(await listFormas()));
 
-export const POST = apiRoute({ role: "ADMIN" }, async (request) => {
+export const POST = apiRoute({}, async (request) => {
   const data = await readJson(request, schema);
   return NextResponse.json(await createForma(data), { status: 201 });
 });

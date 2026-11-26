@@ -18,7 +18,6 @@ import type { InsumoComDetalhes, ReceitaComDetalhes } from "@/lib/types";
 interface ReceitasViewProps {
   receitas: ReceitaComDetalhes[];
   insumos: InsumoComDetalhes[];
-  isAdmin: boolean;
   onRefresh: () => Promise<void>;
   onToast: (msg: string, type?: "success" | "error") => void;
 }
@@ -31,7 +30,6 @@ interface DraftItem {
 export function ReceitasView({
   receitas,
   insumos,
-  isAdmin,
   onRefresh,
   onToast,
 }: ReceitasViewProps) {
@@ -201,16 +199,14 @@ export function ReceitasView({
             Monte suas receitas a partir dos insumos cadastrados e veja o custo real e preço sugerido por tamanho de forma.
           </p>
         </div>
-        {isAdmin && (
-          <button
-            type="button"
-            onClick={openCreate}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-caramelo-600 text-sm font-semibold text-creme-claro hover:bg-caramelo-700 transition shadow-sm cursor-pointer self-start sm:self-auto"
-          >
-            <Plus className="h-4 w-4" />
-            Nova Receita
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={openCreate}
+          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-caramelo-600 text-sm font-semibold text-creme-claro hover:bg-caramelo-700 transition shadow-sm cursor-pointer self-start sm:self-auto"
+        >
+          <Plus className="h-4 w-4" />
+          Nova Receita
+        </button>
       </div>
 
       {/* Recipe Cards */}
@@ -264,7 +260,6 @@ export function ReceitasView({
                       {formatUnitCost(rec.custoPorMl)} / ml
                     </p>
                   </div>
-                  {isAdmin && (
                   <div className="flex flex-col gap-1">
                     <button
                       type="button"
@@ -285,7 +280,6 @@ export function ReceitasView({
                       <Trash2 className="h-4 w-4" />
                     </button>
                   </div>
-                  )}
                 </div>
               </div>
 

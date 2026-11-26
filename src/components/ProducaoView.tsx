@@ -37,7 +37,6 @@ interface ProducaoViewProps {
   ordens: OrdemProducaoComDetalhes[];
   receitas: ReceitaComDetalhes[];
   formas: FormaComDetalhes[];
-  isAdmin: boolean;
   onRefresh: () => Promise<void>;
   onToast: (msg: string, type?: "success" | "error") => void;
 }
@@ -46,7 +45,6 @@ export function ProducaoView({
   ordens,
   receitas,
   formas,
-  isAdmin,
   onRefresh,
   onToast,
 }: ProducaoViewProps) {
@@ -151,13 +149,6 @@ export function ProducaoView({
     }
     if (status === "CONCLUIDA") {
       if (!op.estoqueSuficiente) {
-        if (!isAdmin) {
-          onToast(
-            `Estoque insuficiente para a OP #${op.id}. Reponha os insumos ou peça a um administrador para concluir com baixa forçada.`,
-            "error",
-          );
-          return;
-        }
         const ok = await confirmar({
           titulo: "Estoque insuficiente",
           mensagem: `Há insumos com saldo abaixo do necessário para a OP #${op.id}. Concluir mesmo assim e dar baixa no estoque? O saldo desses insumos ficará negativo.`,
@@ -383,7 +374,7 @@ export function ProducaoView({
                         Reabrir
                       </button>
                     )}
-                    {isAdmin && op.status !== "CONCLUIDA" && (
+                    {op.status !== "CONCLUIDA" && (
                       <button
                         type="button"
                         disabled={busyOrderId !== null}

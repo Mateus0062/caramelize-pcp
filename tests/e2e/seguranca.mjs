@@ -122,19 +122,22 @@ r = await req("POST", "/api/auth/login", { body: { email: opEmail, password: env
 let op = r.cookie;
 check("Login do operador → 200", r.status === 200 && Boolean(op), r.status);
 
-// 10) Permissões do operador
-r = await req("DELETE", "/api/insumos/1", { cookie: op });
-check("Operador não exclui insumo → 403", r.status === 403, r.status);
-r = await req("POST", "/api/categorias", { cookie: op, body: { nome: "Invasora" } });
-check("Operador não cria categoria → 403", r.status === 403, r.status);
-r = await req("PUT", "/api/receitas/1", { cookie: op, body: { nome: "X", rendimentoMl: 1, itens: [{ insumoId: 1, quantidade: 1 }] } });
-check("Operador não edita receita → 403", r.status === 403, r.status);
+// 10) Permissões do operador (mesmo controle do sistema, exceto /api/usuarios)
 r = await req("GET", "/api/usuarios", { cookie: op });
 check("Operador não lista usuários → 403", r.status === 403, r.status);
+r = await req("POST", "/api/usuarios", {
+  cookie: op,
+  body: { nome: "Outro", email: "outro.op@caramelize.test", senha: env.TEST_OPERADOR_PASSWORD, role: "OPERADOR" },
+});
+check("Operador não cria usuários → 403", r.status === 403, r.status);
+r = await req("PATCH", `/api/usuarios/${opId}`, { cookie: op, body: { role: "ADMIN" } });
+check("Operador não altera usuários → 403", r.status === 403, r.status);
+const catOp = await req("POST", "/api/categorias", { cookie: op, body: { nome: "Categoria Operador" } });
+check("Operador cria categoria → 201", catOp.status === 201, catOp.status + " " + catOp.text);
+r = await req("DELETE", `/api/categorias/${catOp.json?.id}`, { cookie: op });
+check("Operador exclui categoria sem uso → 200", r.status === 200, r.status + " " + r.text);
 r = await req("POST", "/api/movimentos", { cookie: op, body: { insumoId: 1, quantidade: 1, tipo: "AJUSTE_ENTRADA" } });
 check("Operador registra movimento → 201", r.status === 201, r.status + " " + r.text);
-r = await req("PATCH", "/api/ordens/1", { cookie: op, body: { status: "CONCLUIDA", permitirEstoqueNegativo: true } });
-check("Operador não força baixa com estoque negativo → 403", r.status === 403, r.status);
 
 // 11) Validação e erros
 r = await req("POST", "/api/movimentos", { cookie: admin, raw: "{nao-e-json" });

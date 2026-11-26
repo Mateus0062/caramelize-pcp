@@ -229,7 +229,6 @@ export default function HomePage() {
         <InsumosView
           insumos={insumos}
           categorias={categorias}
-          isAdmin={isAdmin}
           onRefresh={loadAll}
           onToast={showToast}
         />
@@ -238,7 +237,6 @@ export default function HomePage() {
         <ReceitasView
           receitas={receitas}
           insumos={insumos}
-          isAdmin={isAdmin}
           onRefresh={loadAll}
           onToast={showToast}
         />
@@ -248,7 +246,6 @@ export default function HomePage() {
           ordens={ordens}
           receitas={receitas}
           formas={formas}
-          isAdmin={isAdmin}
           onRefresh={loadAll}
           onToast={showToast}
         />
@@ -261,7 +258,6 @@ export default function HomePage() {
           carregandoMovimentos={carregandoMovimentos}
           onLoadMoreMovimentos={loadMoreMovimentos}
           formas={formas}
-          isAdmin={isAdmin}
           onRefresh={loadAll}
           onToast={showToast}
         />

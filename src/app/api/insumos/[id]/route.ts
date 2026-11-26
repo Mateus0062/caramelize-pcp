@@ -12,13 +12,13 @@ const updateSchema = z.object({
   categoriaId: z.coerce.number().int().positive("Selecione uma categoria"),
 });
 
-export const PUT = apiRoute<{ id: string }>({ role: "ADMIN" }, async (request, { params }) => {
+export const PUT = apiRoute<{ id: string }>({}, async (request, { params }) => {
   const id = parseId(params.id);
   const data = await readJson(request, updateSchema);
   return NextResponse.json(await updateInsumo(id, data));
 });
 
-export const DELETE = apiRoute<{ id: string }>({ role: "ADMIN" }, async (_request, { params }) => {
+export const DELETE = apiRoute<{ id: string }>({}, async (_request, { params }) => {
   await deleteInsumo(parseId(params.id));
   return NextResponse.json({ ok: true });
 });

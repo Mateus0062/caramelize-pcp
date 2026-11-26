@@ -152,8 +152,8 @@ export function UsuariosView({ currentUserId, onToast }: UsuariosViewProps) {
           Usuários
         </h2>
         <p className="text-sm text-cacau-suave mt-1">
-          Somente administradores criam contas. Operadores registram movimentos e
-          ordens; administradores também editam cadastros, preços e receitas.
+          Somente administradores têm acesso a esta aba e gerenciam contas. Operadores
+          têm controle total sobre as demais áreas do sistema (insumos, receitas, estoque, formas e produção).
         </p>
       </div>
 

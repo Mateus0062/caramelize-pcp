@@ -5,7 +5,7 @@ import { consolidarItens, receitaSchema } from "@/lib/receita-schema";
 
 export const GET = apiRoute({}, async () => NextResponse.json(await listReceitas()));
 
-export const POST = apiRoute({ role: "ADMIN" }, async (request) => {
+export const POST = apiRoute({}, async (request) => {
   const data = await readJson(request, receitaSchema);
   const created = await createReceita({ ...data, itens: consolidarItens(data.itens) });
   return NextResponse.json(created, { status: 201 });

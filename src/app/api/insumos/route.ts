@@ -25,7 +25,7 @@ const createInsumoSchema = z.object({
 
 export const GET = apiRoute({}, async () => NextResponse.json(await listInsumos()));
 
-export const POST = apiRoute({ role: "ADMIN" }, async (request) => {
+export const POST = apiRoute({}, async (request) => {
   const data = await readJson(request, createInsumoSchema);
   return NextResponse.json(await createInsumo(data), { status: 201 });
 });

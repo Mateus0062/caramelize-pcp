@@ -9,7 +9,7 @@ const schema = z.object({
 
 export const GET = apiRoute({}, async () => NextResponse.json(await listCategorias()));
 
-export const POST = apiRoute({ role: "ADMIN" }, async (request) => {
+export const POST = apiRoute({}, async (request) => {
   const { nome } = await readJson(request, schema);
   return NextResponse.json(await createCategoria(nome), { status: 201 });
 });

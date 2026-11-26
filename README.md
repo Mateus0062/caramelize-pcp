@@ -83,11 +83,9 @@ Os cálculos de dinheiro e quantidades usam **aritmética decimal exata** (`src/
 | --- | :---: | :---: |
 | Consultar todas as telas e exportar a lista de compras | ✅ | ✅ |
 | Registrar movimentos de estoque | ✅ | ✅ |
-| Criar ordens e mudar o status (inclusive cancelar/reabrir) | ✅ | ✅ |
-| Concluir ordem com estoque insuficiente | — | ✅ |
-| Cadastrar/editar/excluir insumos, categorias, formas e receitas | — | ✅ |
-| Excluir ordens | — | ✅ |
-| Gerenciar usuários | — | ✅ |
+| Criar, concluir (inclusive com baixa forçada), cancelar/reabrir e excluir ordens | ✅ | ✅ |
+| Cadastrar/editar/excluir insumos, categorias, formas e receitas | ✅ | ✅ |
+| Gerenciar usuários (aba Usuários) | — | ✅ |
 
 ## Ordens de produção
 

@@ -32,7 +32,6 @@ interface EstoqueFormasViewProps {
   carregandoMovimentos: boolean;
   onLoadMoreMovimentos: () => Promise<void>;
   formas: FormaComDetalhes[];
-  isAdmin: boolean;
   onRefresh: () => Promise<void>;
   onToast: (msg: string, type?: "success" | "error") => void;
 }
@@ -44,7 +43,6 @@ export function EstoqueFormasView({
   carregandoMovimentos,
   onLoadMoreMovimentos,
   formas,
-  isAdmin,
   onRefresh,
   onToast,
 }: EstoqueFormasViewProps) {
@@ -452,7 +450,6 @@ export function EstoqueFormasView({
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Form Nova Forma */}
-          {isAdmin && (
           <section className="lg:col-span-4 bg-creme-claro rounded-3xl border border-caramelo-200/70 p-5 sm:p-6 shadow-xs h-fit">
             <h3 className="font-display text-xl font-semibold text-cacau">
               Cadastrar Forma / Tamanho
@@ -523,10 +520,9 @@ export function EstoqueFormasView({
               </button>
             </form>
           </section>
-          )}
 
           {/* Lista de Formas */}
-          <section className={`${isAdmin ? "lg:col-span-8" : "lg:col-span-12"} grid grid-cols-1 sm:grid-cols-2 gap-4 h-fit`}>
+          <section className="lg:col-span-8 grid grid-cols-1 sm:grid-cols-2 gap-4 h-fit">
             {formas.map((f) => (
               <div
                 key={f.id}
@@ -544,17 +540,15 @@ export function EstoqueFormasView({
                       <p className="text-xs text-cacau-suave">{f.insumoNome}</p>
                     </div>
                   </div>
-                  {isAdmin && (
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteForma(f)}
-                      className="p-1.5 rounded-lg text-cacau-suave hover:bg-red-100 hover:text-red-700 cursor-pointer"
-                      title="Excluir forma"
-                      aria-label="Excluir forma"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteForma(f)}
+                    className="p-1.5 rounded-lg text-cacau-suave hover:bg-red-100 hover:text-red-700 cursor-pointer"
+                    title="Excluir forma"
+                    aria-label="Excluir forma"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
                 </div>
 
                 <div className="mt-4 pt-3 border-t border-caramelo-100 grid grid-cols-3 gap-2 text-center">

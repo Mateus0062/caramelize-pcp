@@ -20,7 +20,6 @@ import type { Categoria, InsumoComDetalhes } from "@/lib/types";
 interface InsumosViewProps {
   insumos: InsumoComDetalhes[];
   categorias: Categoria[];
-  isAdmin: boolean;
   onRefresh: () => Promise<void>;
   onToast: (msg: string, type?: "success" | "error") => void;
 }
@@ -30,7 +29,6 @@ const UNIDADES = ["g", "ml", "un", "kg", "L"];
 export function InsumosView({
   insumos,
   categorias,
-  isAdmin,
   onRefresh,
   onToast,
 }: InsumosViewProps) {
@@ -240,7 +238,6 @@ export function InsumosView({
             Cadastre cada ingrediente com seu preço unitário para cálculo automático nas receitas.
           </p>
         </div>
-        {isAdmin && (
         <div className="flex flex-wrap gap-2.5">
           <button
             type="button"
@@ -259,7 +256,6 @@ export function InsumosView({
             Novo Insumo
           </button>
         </div>
-        )}
       </div>
 
       {/* Filters */}
@@ -367,8 +363,6 @@ export function InsumosView({
                     {formatBRL(ins.valorEmEstoque)}
                   </td>
                   <td className="py-3.5 px-5 text-right whitespace-nowrap">
-                    {isAdmin ? (
-                    <>
                     <button
                       type="button"
                       onClick={() => openEdit(ins)}
@@ -387,10 +381,6 @@ export function InsumosView({
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
-                    </>
-                    ) : (
-                      <span className="text-xs text-cacau-suave">—</span>
-                    )}
                   </td>
                 </tr>
               ))}
