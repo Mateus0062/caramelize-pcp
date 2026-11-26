@@ -1,10 +1,4 @@
 import { NextResponse } from "next/server";
-import { getCurrentSession } from "@/lib/auth";
+import { apiRoute } from "@/lib/api";
 
-export async function GET() {
-  const user = await getCurrentSession();
-  if (!user) {
-    return NextResponse.json({ error: "Não autenticado" }, { status: 401 });
-  }
-  return NextResponse.json({ user });
-}
+export const GET = apiRoute({}, async (_request, { user }) => NextResponse.json({ user }));

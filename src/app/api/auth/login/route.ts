@@ -1,44 +1,51 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
-import {
-  buildSessionCookieOptions,
-  createSessionToken,
-  SESSION_COOKIE_NAME,
-} from "@/lib/auth";
+import { errorResponse, readJson } from "@/lib/api";
+import { createSessionToken, setSessionCookie, toSessionUser } from "@/lib/auth";
 import { authenticateUser } from "@/lib/auth-db";
+import { HttpError } from "@/lib/errors";
+import { PASSWORD_MAX_LENGTH } from "@/lib/password";
+import {
+  assertNotRateLimited,
+  clearFailures,
+  clientIp,
+  credentialRules,
+  recordFailure,
+} from "@/lib/rate-limit";
 
 const loginSchema = z.object({
-  email: z.string().trim().email("Informe um e-mail válido"),
-  password: z.string().min(4, "Informe sua senha"),
+  email: z.string().trim().email("Informe um e-mail válido").max(120),
+  password: z.string().min(1, "Informe sua senha").max(PASSWORD_MAX_LENGTH),
 });
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const parsed = loginSchema.safeParse(body);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { error: parsed.error.issues[0]?.message ?? "Dados inválidos" },
-        { status: 400 },
+    const { email, password } = await readJson(request, loginSchema);
+    const normalizedEmail = email.toLowerCase();
+    const rules = credentialRules("login", clientIp(request), normalizedEmail);
+    assertNotRateLimited(rules);
+
+    const result = await authenticateUser(normalizedEmail, password);
+
+    if (result.status === "invalid") {
+      recordFailure(rules);
+      throw new HttpError(401, "E-mail ou senha incorretos.");
+    }
+
+    clearFailures([rules[0].key]);
+
+    if (result.status === "must_change_password") {
+      throw new HttpError(
+        403,
+        "Por segurança, defina uma nova senha antes de entrar.",
+        { code: "MUST_CHANGE_PASSWORD" },
       );
     }
 
-    const user = await authenticateUser(parsed.data.email, parsed.data.password);
-    if (!user) {
-      return NextResponse.json(
-        { error: "E-mail ou senha incorretos." },
-        { status: 401 },
-      );
-    }
-
-    const token = createSessionToken(user);
-    const response = NextResponse.json({ user });
-    response.cookies.set(SESSION_COOKIE_NAME, token, buildSessionCookieOptions());
+    const response = NextResponse.json({ user: toSessionUser(result.user) });
+    setSessionCookie(response, await createSessionToken(result.user));
     return response;
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Erro ao fazer login" },
-      { status: 500 },
-    );
+    return errorResponse(err);
   }
 }

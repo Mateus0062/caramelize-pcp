@@ -1,50 +1,104 @@
 "use client";
 
-import { Eye, EyeOff, Lock, Mail, User } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Lock, Mail } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+type Mode = "login" | "senha";
+
+const PASSWORD_MIN_LENGTH = 8;
+
+const inputClass =
+  "w-full pl-10 pr-10 py-2.5 rounded-xl bg-creme border border-caramelo-200 text-sm text-cacau focus:outline-none focus:border-caramelo-500";
+const labelClass =
+  "block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5";
+
 export default function LoginPage() {
   const router = useRouter();
-  const [mode, setMode] = useState<"login" | "register">("login");
-  const [nome, setNome] = useState("");
+  const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [novaSenha, setNovaSenha] = useState("");
+  const [confirmarSenha, setConfirmarSenha] = useState("");
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setError(null);
+    setNotice(null);
+    setNovaSenha("");
+    setConfirmarSenha("");
+  };
+
+  const handleLogin = async () => {
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (res.status === 403 && data.code === "MUST_CHANGE_PASSWORD") {
+      setMode("senha");
+      setNotice(
+        data.error ?? "Por segurança, defina uma nova senha antes de entrar.",
+      );
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(data.error || "Não foi possível entrar.");
+    }
+    router.replace("/");
+    router.refresh();
+  };
+
+  const handleChangePassword = async () => {
+    if (novaSenha.length < PASSWORD_MIN_LENGTH) {
+      throw new Error(`A nova senha deve ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres.`);
+    }
+    if (novaSenha !== confirmarSenha) {
+      throw new Error("A confirmação não confere com a nova senha.");
+    }
+    const res = await fetch("/api/auth/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, senhaAtual: password, novaSenha }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || "Não foi possível trocar a senha.");
+    }
+    router.replace("/");
+    router.refresh();
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
-
     try {
-      const endpoint =
-        mode === "login" ? "/api/auth/login" : "/api/auth/register";
-      const payload =
-        mode === "login" ? { email, password } : { nome, email, password };
-
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Não foi possível autenticar.");
-      }
-
-      router.replace("/");
-      router.refresh();
+      if (mode === "login") await handleLogin();
+      else await handleChangePassword();
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Erro ao processar solicitação.",
-      );
+      setError(err instanceof Error ? err.message : "Erro ao processar solicitação.");
     } finally {
       setLoading(false);
     }
   };
+
+  const toggleShowPass = (
+    <button
+      type="button"
+      onClick={() => setShowPass((v) => !v)}
+      className="absolute right-3 top-1/2 -translate-y-1/2 text-cacau-suave hover:text-cacau cursor-pointer"
+      aria-label={showPass ? "Ocultar senha" : "Mostrar senha"}
+    >
+      {showPass ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+    </button>
+  );
 
   return (
     <div className="min-h-screen bg-creme flex items-center justify-center p-4 sm:p-6">
@@ -66,112 +120,102 @@ export default function LoginPage() {
 
         {/* Card */}
         <div className="bg-creme-claro rounded-3xl border border-caramelo-200/80 p-6 sm:p-8 shadow-sm">
-          {/* Tabs Entrar / Criar Conta */}
-          <div className="grid grid-cols-2 rounded-2xl bg-creme border border-caramelo-200/70 p-1 mb-6">
-            <button
-              type="button"
-              onClick={() => {
-                setMode("login");
-                setError(null);
-              }}
-              className={`py-2 rounded-xl text-sm font-semibold transition cursor-pointer ${
-                mode === "login"
-                  ? "bg-caramelo-600 text-creme-claro shadow-xs"
-                  : "text-cacau-suave hover:text-cacau"
-              }`}
-            >
-              Entrar
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setMode("register");
-                setError(null);
-              }}
-              className={`py-2 rounded-xl text-sm font-semibold transition cursor-pointer ${
-                mode === "register"
-                  ? "bg-caramelo-600 text-creme-claro shadow-xs"
-                  : "text-cacau-suave hover:text-cacau"
-              }`}
-            >
-              Criar Conta
-            </button>
-          </div>
+          <h2 className="font-display text-2xl font-semibold text-cacau mb-5">
+            {mode === "login" ? "Entrar" : "Trocar senha"}
+          </h2>
+
+          {notice && (
+            <div className="mb-4 rounded-xl bg-amber-50 border border-amber-200 px-3.5 py-2.5 text-xs font-medium text-amber-900">
+              {notice}
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === "register" && (
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
-                  Nome Completo
-                </label>
-                <div className="relative">
-                  <User className="h-4 w-4 text-cacau-suave absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    required
-                    value={nome}
-                    onChange={(e) => setNome(e.target.value)}
-                    placeholder="Ex.: Maria Caramelize"
-                    className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-creme border border-caramelo-200 text-sm text-cacau focus:outline-none focus:border-caramelo-500"
-                  />
-                </div>
-              </div>
-            )}
-
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+              <label htmlFor="email" className={labelClass}>
                 E-mail
               </label>
               <div className="relative">
                 <Mail className="h-4 w-4 text-cacau-suave absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
+                  id="email"
                   type="email"
                   required
-                  autoComplete="email"
+                  autoComplete="username"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="seu@email.com.br"
-                  className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-creme border border-caramelo-200 text-sm text-cacau focus:outline-none focus:border-caramelo-500"
+                  className={inputClass}
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
-                Senha
+              <label htmlFor="password" className={labelClass}>
+                {mode === "login" ? "Senha" : "Senha atual"}
               </label>
               <div className="relative">
                 <Lock className="h-4 w-4 text-cacau-suave absolute left-3.5 top-1/2 -translate-y-1/2" />
                 <input
+                  id="password"
                   type={showPass ? "text" : "password"}
                   required
-                  autoComplete={
-                    mode === "login" ? "current-password" : "new-password"
-                  }
+                  autoComplete="current-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder={
-                    mode === "register" ? "Mínimo 6 caracteres" : "••••••••"
-                  }
-                  className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-creme border border-caramelo-200 text-sm text-cacau focus:outline-none focus:border-caramelo-500"
+                  placeholder="••••••••"
+                  className={inputClass}
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowPass((v) => !v)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-cacau-suave hover:text-cacau cursor-pointer"
-                  tabIndex={-1}
-                >
-                  {showPass ? (
-                    <EyeOff className="h-4 w-4" />
-                  ) : (
-                    <Eye className="h-4 w-4" />
-                  )}
-                </button>
+                {toggleShowPass}
               </div>
             </div>
 
+            {mode === "senha" && (
+              <>
+                <div>
+                  <label htmlFor="nova-senha" className={labelClass}>
+                    Nova senha
+                  </label>
+                  <div className="relative">
+                    <KeyRound className="h-4 w-4 text-cacau-suave absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      id="nova-senha"
+                      type={showPass ? "text" : "password"}
+                      required
+                      minLength={PASSWORD_MIN_LENGTH}
+                      autoComplete="new-password"
+                      value={novaSenha}
+                      onChange={(e) => setNovaSenha(e.target.value)}
+                      placeholder={`Mínimo ${PASSWORD_MIN_LENGTH} caracteres`}
+                      className={inputClass}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="confirmar-senha" className={labelClass}>
+                    Confirmar nova senha
+                  </label>
+                  <div className="relative">
+                    <KeyRound className="h-4 w-4 text-cacau-suave absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      id="confirmar-senha"
+                      type={showPass ? "text" : "password"}
+                      required
+                      autoComplete="new-password"
+                      value={confirmarSenha}
+                      onChange={(e) => setConfirmarSenha(e.target.value)}
+                      className={inputClass}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+
             {error && (
-              <div className="rounded-xl bg-red-50 border border-red-200 px-3.5 py-2.5 text-xs font-medium text-red-700">
+              <div
+                role="alert"
+                className="rounded-xl bg-red-50 border border-red-200 px-3.5 py-2.5 text-xs font-medium text-red-700"
+              >
                 {error}
               </div>
             )}
@@ -185,26 +229,22 @@ export default function LoginPage() {
                 ? "Aguarde..."
                 : mode === "login"
                   ? "Entrar no Sistema"
-                  : "Criar Conta e Entrar"}
+                  : "Salvar nova senha e entrar"}
             </button>
           </form>
 
-          {mode === "login" && (
-            <div className="mt-5 pt-4 border-t border-caramelo-200/70 text-center">
-              <p className="text-xs text-cacau-suave">
-                Primeiro acesso? Use o administrador padrão:
-              </p>
-              <p className="text-xs font-medium text-cacau mt-1">
-                <code className="px-1.5 py-0.5 rounded bg-caramelo-50 border border-caramelo-200">
-                  admin@caramelize.com.br
-                </code>{" "}
-                ·{" "}
-                <code className="px-1.5 py-0.5 rounded bg-caramelo-50 border border-caramelo-200">
-                  caramelize123
-                </code>
-              </p>
-            </div>
-          )}
+          <div className="mt-5 pt-4 border-t border-caramelo-200/70 text-center space-y-2">
+            <button
+              type="button"
+              onClick={() => switchMode(mode === "login" ? "senha" : "login")}
+              className="text-xs font-semibold text-caramelo-700 hover:text-caramelo-800 cursor-pointer"
+            >
+              {mode === "login" ? "Quero trocar minha senha" : "Voltar para o login"}
+            </button>
+            <p className="text-xs text-cacau-suave">
+              Não tem acesso? Peça a um administrador para criar sua conta.
+            </p>
+          </div>
         </div>
       </div>
     </div>

@@ -1,44 +1,31 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod";
+import { apiRoute, readJson } from "@/lib/api";
 import { createInsumo, listInsumos } from "@/lib/db";
+import { MAX_QUANTIDADE, MAX_VALOR } from "@/lib/limits";
 
 const createInsumoSchema = z.object({
   nome: z.string().trim().min(2, "Informe o nome do insumo").max(80),
   unidadeMedida: z.string().trim().min(1, "Informe a unidade").max(10),
-  estoqueMinimo: z.coerce.number().min(0, "Estoque mínimo deve ser >= 0"),
-  custoUnitario: z.coerce.number().min(0, "Custo unitário deve ser >= 0"),
+  estoqueMinimo: z.coerce
+    .number()
+    .min(0, "Estoque mínimo deve ser >= 0")
+    .max(MAX_QUANTIDADE, "Estoque mínimo muito alto"),
+  custoUnitario: z.coerce
+    .number()
+    .min(0, "Custo unitário deve ser >= 0")
+    .max(MAX_VALOR, "Custo unitário muito alto"),
   categoriaId: z.coerce.number().int().positive("Selecione uma categoria"),
-  estoqueInicial: z.coerce.number().min(0).optional(),
+  estoqueInicial: z.coerce
+    .number()
+    .min(0)
+    .max(MAX_QUANTIDADE, "Estoque inicial muito alto")
+    .optional(),
 });
 
-export async function GET() {
-  try {
-    const insumos = await listInsumos();
-    return NextResponse.json(insumos);
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Erro ao listar insumos" },
-      { status: 500 },
-    );
-  }
-}
+export const GET = apiRoute({}, async () => NextResponse.json(await listInsumos()));
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const parsed = createInsumoSchema.safeParse(body);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { error: parsed.error.issues[0]?.message ?? "Dados inválidos" },
-        { status: 400 },
-      );
-    }
-    const created = await createInsumo(parsed.data);
-    return NextResponse.json(created, { status: 201 });
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Erro ao criar insumo" },
-      { status: 400 },
-    );
-  }
-}
+export const POST = apiRoute({ role: "ADMIN" }, async (request) => {
+  const data = await readJson(request, createInsumoSchema);
+  return NextResponse.json(await createInsumo(data), { status: 201 });
+});

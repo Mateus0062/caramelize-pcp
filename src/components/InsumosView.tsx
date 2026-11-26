@@ -11,12 +11,13 @@ import {
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { formatBRL, formatQty, formatUnitCost } from "@/lib/format";
+import { formatBRL, formatQty, formatUnitCost, parseDecimal } from "@/lib/format";
 import type { Categoria, InsumoComDetalhes } from "@/lib/types";
 
 interface InsumosViewProps {
   insumos: InsumoComDetalhes[];
   categorias: Categoria[];
+  isAdmin: boolean;
   onRefresh: () => Promise<void>;
   onToast: (msg: string, type?: "success" | "error") => void;
 }
@@ -26,6 +27,7 @@ const UNIDADES = ["g", "ml", "un", "kg", "L"];
 export function InsumosView({
   insumos,
   categorias,
+  isAdmin,
   onRefresh,
   onToast,
 }: InsumosViewProps) {
@@ -93,8 +95,8 @@ export function InsumosView({
   };
 
   const aplicarCalculadora = () => {
-    const preco = Number(precoEmbalagem.replace(",", "."));
-    const qtd = Number(qtdEmbalagem.replace(",", "."));
+    const preco = parseDecimal(precoEmbalagem);
+    const qtd = parseDecimal(qtdEmbalagem);
     if (preco > 0 && qtd > 0) {
       setCustoUnitario((preco / qtd).toFixed(4));
     }
@@ -108,13 +110,13 @@ export function InsumosView({
         nome,
         unidadeMedida,
         categoriaId: Number(categoriaId),
-        custoUnitario: Number(String(custoUnitario).replace(",", ".")),
-        estoqueMinimo: Number(String(estoqueMinimo).replace(",", ".")),
+        custoUnitario: parseDecimal(custoUnitario),
+        estoqueMinimo: parseDecimal(estoqueMinimo),
         ...(editing
           ? {}
           : {
               estoqueInicial:
-                Number(String(estoqueInicial || "0").replace(",", ".")) || 0,
+                parseDecimal(estoqueInicial || "0") || 0,
             }),
       };
 
@@ -188,6 +190,7 @@ export function InsumosView({
   };
 
   const handleDeleteCategoria = async (cat: Categoria) => {
+    if (!confirm(`Excluir a categoria "${cat.nome}"?`)) return;
     try {
       const res = await fetch(`/api/categorias/${cat.id}`, {
         method: "DELETE",
@@ -219,6 +222,7 @@ export function InsumosView({
             Cadastre cada ingrediente com seu preço unitário para cálculo automático nas receitas.
           </p>
         </div>
+        {isAdmin && (
         <div className="flex flex-wrap gap-2.5">
           <button
             type="button"
@@ -237,6 +241,7 @@ export function InsumosView({
             Novo Insumo
           </button>
         </div>
+        )}
       </div>
 
       {/* Filters */}
@@ -326,6 +331,14 @@ export function InsumosView({
                     }`}
                   >
                     {formatQty(ins.saldoAtual, ins.unidadeMedida)}
+                    {ins.saldoAtual < 0 && (
+                      <span
+                        className="block text-[11px] font-medium text-red-700"
+                        title="Saldo negativo: houve baixa forçada sem estoque. Registre a compra ou um ajuste de entrada."
+                      >
+                        Saldo negativo
+                      </span>
+                    )}
                   </td>
                   <td className="py-3.5 px-4 text-cacau-suave">
                     {formatQty(ins.estoqueMinimo, ins.unidadeMedida)}
@@ -334,6 +347,8 @@ export function InsumosView({
                     {formatBRL(ins.valorEmEstoque)}
                   </td>
                   <td className="py-3.5 px-5 text-right whitespace-nowrap">
+                    {isAdmin ? (
+                    <>
                     <button
                       type="button"
                       onClick={() => openEdit(ins)}
@@ -350,6 +365,10 @@ export function InsumosView({
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
+                    </>
+                    ) : (
+                      <span className="text-xs text-cacau-suave">—</span>
+                    )}
                   </td>
                 </tr>
               ))}

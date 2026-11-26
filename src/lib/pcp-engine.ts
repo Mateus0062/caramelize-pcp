@@ -14,7 +14,44 @@ import type {
   ReceitaComDetalhes,
   ReceitaItem,
   ReceitaItemComDetalhes,
+  StatusOrdemProducao,
 } from "./types";
+
+// ============================================================================
+// Ciclo de vida da Ordem de Produção
+// ============================================================================
+export const STATUS_LABEL: Record<StatusOrdemProducao, string> = {
+  PLANEJADA: "Planejada",
+  EM_PRODUCAO: "Em Produção",
+  CONCLUIDA: "Concluída",
+  CANCELADA: "Cancelada",
+};
+
+/** Transições permitidas. Uma ordem concluída não muda mais (o estoque já foi baixado). */
+export const TRANSICOES_STATUS: Record<StatusOrdemProducao, StatusOrdemProducao[]> = {
+  PLANEJADA: ["EM_PRODUCAO", "CONCLUIDA", "CANCELADA"],
+  EM_PRODUCAO: ["CONCLUIDA", "CANCELADA"],
+  CANCELADA: ["PLANEJADA"],
+  CONCLUIDA: [],
+};
+
+/** Retorna null se a transição é permitida, ou a mensagem de erro. */
+export function validarTransicaoStatus(
+  de: StatusOrdemProducao,
+  para: StatusOrdemProducao,
+): string | null {
+  if (de === para) return `A ordem já está ${STATUS_LABEL[para].toLowerCase()}.`;
+  if (de === "CONCLUIDA") return "Ordem de produção já foi concluída e baixada no estoque.";
+  if (!TRANSICOES_STATUS[de]?.includes(para)) {
+    return `Não é possível mudar uma ordem ${STATUS_LABEL[de].toLowerCase()} para ${STATUS_LABEL[para].toLowerCase()}.`;
+  }
+  return null;
+}
+
+/** Ordens que ainda vão consumir estoque. */
+export function ordemAtiva(status: StatusOrdemProducao): boolean {
+  return status === "PLANEJADA" || status === "EM_PRODUCAO";
+}
 
 export function calcularSaldosMap(
   movimentos: MovimentoEstoque[],
@@ -42,9 +79,9 @@ export function enriquecerInsumos(
   return insumos
     .filter((i) => i.ativo)
     .map((insumo) => {
-      const saldoAtual = Math.max(0, saldos.get(insumo.id) ?? 0);
+      const saldoAtual = saldos.get(insumo.id) ?? 0;
       const abaixoMinimo = saldoAtual <= insumo.estoqueMinimo;
-      const valorEmEstoque = Number((saldoAtual * insumo.custoUnitario).toFixed(2));
+      const valorEmEstoque = Number((Math.max(0, saldoAtual) * insumo.custoUnitario).toFixed(2));
       return {
         ...insumo,
         categoriaNome: catMap.get(insumo.categoriaId) ?? "Sem categoria",
@@ -92,7 +129,7 @@ export function enriquecerFormas(
         nome: f.nome || ins?.nome || `Forma #${f.id}`,
         insumoNome: ins?.nome ?? `Insumo #${f.insumoId}`,
         custoUnitario: ins?.custoUnitario ?? 0,
-        saldoAtual: Math.max(0, saldos.get(f.insumoId) ?? 0),
+        saldoAtual: saldos.get(f.insumoId) ?? 0,
       };
     })
     .sort((a, b) => a.volumeMl - b.volumeMl);
@@ -132,7 +169,7 @@ export function enriquecerReceitas(
             unidadeMedida: ins?.unidadeMedida ?? "un",
             custoUnitario,
             custoSubtotal,
-            saldoAtual: Math.max(0, saldos.get(it.insumoId) ?? 0),
+            saldoAtual: saldos.get(it.insumoId) ?? 0,
           };
         });
 
@@ -199,10 +236,10 @@ export function calcularNecessidadesOrdem(
     receita.rendimentoMl > 0 ? volumeTotalMl / receita.rendimentoMl : 0;
 
   const necessidades: NecessidadeInsumo[] = receita.itens.map((item) => {
-    const quantidadeNecessaria = Number((item.quantidade * fatorEscala).toFixed(2));
+    const quantidadeNecessaria = Number((item.quantidade * fatorEscala).toFixed(3));
     const falta = Math.max(
       0,
-      Number((quantidadeNecessaria - item.saldoAtual).toFixed(2)),
+      Number((quantidadeNecessaria - item.saldoAtual).toFixed(3)),
     );
     const custoTotal = Number((quantidadeNecessaria * item.custoUnitario).toFixed(2));
     return {
@@ -221,7 +258,7 @@ export function calcularNecessidadesOrdem(
   // Adiciona a própria forma/embalagem como insumo necessário
   const faltaForma = Math.max(
     0,
-    Number((quantidadeUnidades - forma.saldoAtual).toFixed(2)),
+    Number((quantidadeUnidades - forma.saldoAtual).toFixed(3)),
   );
   necessidades.push({
     insumoId: forma.insumoId,
@@ -298,8 +335,7 @@ export function enriquecerOrdens(
             ? Number((op.custoTotalEstimado / op.quantidadeUnidades).toFixed(2))
             : calc.custoUnitario,
         necessidades: calc.necessidades,
-        estoqueSuficiente:
-          op.status === "CONCLUIDA" ? true : calc.estoqueSuficiente,
+        estoqueSuficiente: ordemAtiva(op.status) ? calc.estoqueSuficiente : true,
       };
     });
 }

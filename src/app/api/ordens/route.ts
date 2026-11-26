@@ -1,6 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod";
+import { apiRoute, readJson } from "@/lib/api";
 import { createOrdemProducao, listOrdensProducao } from "@/lib/db";
+import { MAX_UNIDADES, MAX_VALOR } from "@/lib/limits";
 
 const createSchema = z.object({
   receitaId: z.coerce.number().int().positive("Selecione uma receita"),
@@ -8,40 +10,21 @@ const createSchema = z.object({
   quantidadeUnidades: z.coerce
     .number()
     .int()
-    .positive("Quantidade deve ser maior que zero"),
-  precoVendaUnitario: z.coerce.number().min(0).nullable().optional(),
+    .positive("Quantidade deve ser maior que zero")
+    .max(MAX_UNIDADES, "Quantidade muito alta"),
+  precoVendaUnitario: z.coerce
+    .number()
+    .min(0)
+    .max(MAX_VALOR, "Preço muito alto")
+    .nullable()
+    .optional(),
   observacao: z.string().max(255).nullable().optional(),
-  dataPrevista: z.string().optional(),
+  dataPrevista: z.string().max(40).optional(),
 });
 
-export async function GET() {
-  try {
-    const ordens = await listOrdensProducao();
-    return NextResponse.json(ordens);
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Erro ao listar ordens" },
-      { status: 500 },
-    );
-  }
-}
+export const GET = apiRoute({}, async () => NextResponse.json(await listOrdensProducao()));
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const parsed = createSchema.safeParse(body);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { error: parsed.error.issues[0]?.message ?? "Dados inválidos" },
-        { status: 400 },
-      );
-    }
-    const created = await createOrdemProducao(parsed.data);
-    return NextResponse.json(created, { status: 201 });
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Erro ao criar ordem" },
-      { status: 400 },
-    );
-  }
-}
+export const POST = apiRoute({}, async (request) => {
+  const data = await readJson(request, createSchema);
+  return NextResponse.json(await createOrdemProducao(data), { status: 201 });
+});

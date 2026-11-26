@@ -12,6 +12,7 @@ import { EstoqueFormasView } from "@/components/EstoqueFormasView";
 import { InsumosView } from "@/components/InsumosView";
 import { ProducaoView } from "@/components/ProducaoView";
 import { ReceitasView } from "@/components/ReceitasView";
+import { UsuariosView } from "@/components/UsuariosView";
 import type {
   Categoria,
   DashboardResumo,
@@ -63,36 +64,38 @@ export default function HomePage() {
         setUser(meData.user ?? null);
       }
 
-      const [dashRes, catRes, insRes, movRes, formRes, recRes, opRes] =
-        await Promise.all([
-          fetch("/api/dashboard", { cache: "no-store" }),
-          fetch("/api/categorias", { cache: "no-store" }),
-          fetch("/api/insumos", { cache: "no-store" }),
-          fetch("/api/movimentos", { cache: "no-store" }),
-          fetch("/api/formas", { cache: "no-store" }),
-          fetch("/api/receitas", { cache: "no-store" }),
-          fetch("/api/ordens", { cache: "no-store" }),
-        ]);
+      const endpoints = [
+        "/api/dashboard",
+        "/api/categorias",
+        "/api/insumos",
+        "/api/movimentos",
+        "/api/formas",
+        "/api/receitas",
+        "/api/ordens",
+      ];
+      const responses = await Promise.all(
+        endpoints.map((url) => fetch(url, { cache: "no-store" })),
+      );
 
-      if (dashRes.status === 401) {
+      // Confere TODAS as respostas antes de usar qualquer uma: se uma falhar,
+      // a tela mostra o erro em vez de quebrar tentando listar um objeto de erro.
+      if (responses.some((res) => res.status === 401)) {
         router.replace("/login");
         return;
       }
-
-      if (!dashRes.ok) {
-        const errBody = await dashRes.json().catch(() => ({}));
+      const failed = responses.find((res) => !res.ok);
+      if (failed) {
+        const errBody = await failed.json().catch(() => ({}));
         throw new Error(errBody.error || "Falha ao carregar dados do PCP");
       }
 
-      const [dash, cats, ins, movs, fms, recs, ops] = await Promise.all([
-        dashRes.json(),
-        catRes.json(),
-        insRes.json(),
-        movRes.json(),
-        formRes.json(),
-        recRes.json(),
-        opRes.json(),
-      ]);
+      const [dash, cats, ins, movs, fms, recs, ops] = await Promise.all(
+        responses.map((res) => res.json()),
+      );
+      const listas = [cats, ins, movs, fms, recs, ops];
+      if (!dash || typeof dash !== "object" || listas.some((l) => !Array.isArray(l))) {
+        throw new Error("Resposta inesperada do servidor ao carregar os dados.");
+      }
 
       setDashboard(dash);
       setCategorias(cats);
@@ -109,7 +112,7 @@ export default function HomePage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [router]);
 
   const handleLogout = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -161,6 +164,8 @@ export default function HomePage() {
     );
   }
 
+  const isAdmin = user?.role === "ADMIN";
+
   return (
     <AppShell
       activeTab={activeTab}
@@ -178,6 +183,7 @@ export default function HomePage() {
         <InsumosView
           insumos={insumos}
           categorias={categorias}
+          isAdmin={isAdmin}
           onRefresh={loadAll}
           onToast={showToast}
         />
@@ -186,6 +192,7 @@ export default function HomePage() {
         <ReceitasView
           receitas={receitas}
           insumos={insumos}
+          isAdmin={isAdmin}
           onRefresh={loadAll}
           onToast={showToast}
         />
@@ -195,6 +202,7 @@ export default function HomePage() {
           ordens={ordens}
           receitas={receitas}
           formas={formas}
+          isAdmin={isAdmin}
           onRefresh={loadAll}
           onToast={showToast}
         />
@@ -204,9 +212,13 @@ export default function HomePage() {
           insumos={insumos}
           movimentos={movimentos}
           formas={formas}
+          isAdmin={isAdmin}
           onRefresh={loadAll}
           onToast={showToast}
         />
+      )}
+      {activeTab === "usuarios" && isAdmin && user && (
+        <UsuariosView currentUserId={user.id} onToast={showToast} />
       )}
 
       {/* Toast Notification */}

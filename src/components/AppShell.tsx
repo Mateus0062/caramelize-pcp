@@ -9,6 +9,7 @@ import {
   LogOut,
   Menu,
   Package,
+  Users,
   X,
 } from "lucide-react";
 import { useState } from "react";
@@ -18,7 +19,8 @@ export type ActiveTab =
   | "insumos"
   | "receitas"
   | "producao"
-  | "estoque";
+  | "estoque"
+  | "usuarios";
 
 export interface AuthUserInfo {
   id: number;
@@ -43,6 +45,7 @@ const NAV_ITEMS: Array<{
   label: string;
   subtitle: string;
   icon: typeof LayoutDashboard;
+  adminOnly?: boolean;
 }> = [
   {
     id: "dashboard",
@@ -74,6 +77,13 @@ const NAV_ITEMS: Array<{
     subtitle: "Entradas e tamanhos",
     icon: Boxes,
   },
+  {
+    id: "usuarios",
+    label: "Usuários",
+    subtitle: "Contas e permissões",
+    icon: Users,
+    adminOnly: true,
+  },
 ];
 
 export function AppShell({
@@ -87,6 +97,7 @@ export function AppShell({
   children,
 }: AppShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const navItems = NAV_ITEMS.filter((item) => !item.adminOnly || user?.role === "ADMIN");
 
   const handleSelect = (tab: ActiveTab) => {
     onTabChange(tab);
@@ -152,7 +163,7 @@ export function AppShell({
                 </button>
               </div>
               <nav className="mt-5 space-y-1.5">
-                {NAV_ITEMS.map((item) => {
+                {navItems.map((item) => {
                   const Icon = item.icon;
                   const active = activeTab === item.id;
                   return (
@@ -236,7 +247,7 @@ export function AppShell({
           </div>
 
           <nav className="mt-6 space-y-1.5">
-            {NAV_ITEMS.map((item) => {
+            {navItems.map((item) => {
               const Icon = item.icon;
               const active = activeTab === item.id;
               return (

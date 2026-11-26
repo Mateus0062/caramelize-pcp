@@ -1,107 +1,64 @@
-import crypto from "node:crypto";
 import { cookies } from "next/headers";
+import type { NextResponse } from "next/server";
+import { findUserById, type UserRecord, type UserRole } from "./auth-db";
+import {
+  passwordFingerprint,
+  SESSION_COOKIE_NAME,
+  SESSION_MAX_AGE_SECONDS,
+  signSessionToken,
+  verifySessionToken,
+} from "./session-token";
 
-export const SESSION_COOKIE_NAME = "caramelize_session";
-const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7; // 7 dias
+export { SESSION_COOKIE_NAME };
 
 export interface SessionUser {
   id: number;
   nome: string;
   email: string;
-  role: "ADMIN" | "OPERADOR";
+  role: UserRole;
 }
 
-interface SessionPayload extends SessionUser {
-  exp: number;
+export function toSessionUser(user: UserRecord): SessionUser {
+  return { id: user.id, nome: user.nome, email: user.email, role: user.role };
 }
 
-function getSecret(): string {
-  return (
-    process.env.AUTH_SECRET?.trim() ||
-    "caramelize-pcp-local-dev-secret-change-in-production-2026"
-  );
+export async function createSessionToken(user: Pick<UserRecord, "id" | "senhaHash">): Promise<string> {
+  return signSessionToken({ sub: user.id, fp: await passwordFingerprint(user.senhaHash) });
 }
 
-export function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16).toString("hex");
-  const derived = crypto.scryptSync(password, salt, 64).toString("hex");
-  return `${salt}:${derived}`;
-}
-
-export function verifyPassword(password: string, storedHash: string): boolean {
-  const parts = storedHash.split(":");
-  if (parts.length !== 2) return false;
-  const [salt, keyHex] = parts;
-  const derived = crypto.scryptSync(password, salt, 64);
-  const keyBuf = Buffer.from(keyHex, "hex");
-  if (derived.length !== keyBuf.length) return false;
-  return crypto.timingSafeEqual(derived, keyBuf);
-}
-
-export function createSessionToken(user: SessionUser): string {
-  const payload: SessionPayload = {
-    ...user,
-    exp: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SECONDS,
-  };
-  const encoded = Buffer.from(JSON.stringify(payload), "utf-8").toString(
-    "base64url",
-  );
-  const signature = crypto
-    .createHmac("sha256", getSecret())
-    .update(encoded)
-    .digest("base64url");
-  return `${encoded}.${signature}`;
-}
-
-export function verifySessionToken(token: string | undefined): SessionUser | null {
-  if (!token) return null;
-  const parts = token.split(".");
-  if (parts.length !== 2) return null;
-  const [encoded, signature] = parts;
-
-  const expected = crypto
-    .createHmac("sha256", getSecret())
-    .update(encoded)
-    .digest("base64url");
-
-  const sigBuf = Buffer.from(signature);
-  const expBuf = Buffer.from(expected);
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-    return null;
-  }
-
-  try {
-    const payload = JSON.parse(
-      Buffer.from(encoded, "base64url").toString("utf-8"),
-    ) as SessionPayload;
-
-    if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) {
-      return null;
-    }
-
-    return {
-      id: payload.id,
-      nome: payload.nome,
-      email: payload.email,
-      role: payload.role,
-    };
-  } catch {
-    return null;
-  }
-}
-
+/**
+ * Sessão do usuário atual, validada contra o banco a cada requisição:
+ * - assinatura e expiração do token;
+ * - usuário existe e está ativo;
+ * - a senha não mudou desde o login (trocar a senha encerra as outras sessões);
+ * - papel (ADMIN/OPERADOR) sempre lido do banco, nunca do token.
+ */
 export async function getCurrentSession(): Promise<SessionUser | null> {
   const cookieStore = await cookies();
-  const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
-  return verifySessionToken(token);
+  const payload = await verifySessionToken(cookieStore.get(SESSION_COOKIE_NAME)?.value);
+  if (!payload) return null;
+
+  const user = await findUserById(payload.sub);
+  if (!user || !user.ativo) return null;
+  if ((await passwordFingerprint(user.senhaHash)) !== payload.fp) return null;
+
+  return toSessionUser(user);
 }
 
-export function buildSessionCookieOptions() {
+function sessionCookieOptions(maxAge: number) {
   return {
     httpOnly: true,
     sameSite: "lax" as const,
     secure: process.env.NODE_ENV === "production",
     path: "/",
-    maxAge: SESSION_MAX_AGE_SECONDS,
+    maxAge,
   };
+}
+
+export function setSessionCookie(response: NextResponse, token: string): void {
+  response.cookies.set(SESSION_COOKIE_NAME, token, sessionCookieOptions(SESSION_MAX_AGE_SECONDS));
+}
+
+export function clearSessionCookie(response: NextResponse): void {
+  response.cookies.set(SESSION_COOKIE_NAME, "", sessionCookieOptions(0));
 }

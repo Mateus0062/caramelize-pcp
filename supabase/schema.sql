@@ -6,7 +6,7 @@
 CREATE TABLE IF NOT EXISTS categoria (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     nome VARCHAR(50) NOT NULL,
-    data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    data_atualizacao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS insumo (
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS insumo (
     unidade_medida VARCHAR(10) NOT NULL,
     estoque_minimo DECIMAL(12, 3) NOT NULL DEFAULT 0,
     custo_unitario DECIMAL(12, 4) NOT NULL DEFAULT 0,
-    data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    data_atualizacao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     categoria_id INTEGER NOT NULL,
     ativo BOOLEAN NOT NULL DEFAULT true,
     CONSTRAINT fk_categoria FOREIGN KEY (categoria_id) REFERENCES categoria (id)
@@ -26,8 +26,8 @@ CREATE TABLE IF NOT EXISTS movimento_estoque (
     quantidade DECIMAL(12, 3) NOT NULL CHECK (quantidade > 0),
     tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('COMPRA', 'PRODUCAO', 'AJUSTE_ENTRADA', 'AJUSTE_SAIDA')),
     custo_unitario DECIMAL(12, 4),
-    data_movimento TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    data_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    data_movimento TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    data_registro TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     observacao VARCHAR(255),
     insumo_id INTEGER NOT NULL,
     CONSTRAINT fk_insumo FOREIGN KEY (insumo_id) REFERENCES insumo (id)
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS receita (
     descricao VARCHAR(255),
     rendimento_ml DECIMAL(12, 2) NOT NULL CHECK (rendimento_ml > 0),
     margem_lucro DECIMAL(5, 2) NOT NULL DEFAULT 65.00,
-    data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    data_atualizacao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS forma (
@@ -69,9 +69,9 @@ CREATE TABLE IF NOT EXISTS ordem_producao (
     custo_total_estimado DECIMAL(12, 2) NOT NULL DEFAULT 0,
     preco_venda_unitario DECIMAL(12, 2),
     observacao VARCHAR(255),
-    data_prevista TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    data_conclusao TIMESTAMP,
+    data_prevista TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    data_criacao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    data_conclusao TIMESTAMPTZ,
     CONSTRAINT fk_op_receita FOREIGN KEY (receita_id) REFERENCES receita (id),
     CONSTRAINT fk_op_forma FOREIGN KEY (forma_id) REFERENCES forma (id)
 );
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS ordem_producao (
 ALTER TABLE forma ADD COLUMN IF NOT EXISTS nome VARCHAR(80);
 ALTER TABLE receita ADD COLUMN IF NOT EXISTS descricao VARCHAR(255);
 ALTER TABLE receita ADD COLUMN IF NOT EXISTS margem_lucro DECIMAL(5, 2) NOT NULL DEFAULT 65.00;
-ALTER TABLE receita ADD COLUMN IF NOT EXISTS data_atualizacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE receita ADD COLUMN IF NOT EXISTS data_atualizacao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
 ALTER TABLE insumo ALTER COLUMN custo_unitario TYPE DECIMAL(12, 4);
 ALTER TABLE insumo ALTER COLUMN estoque_minimo TYPE DECIMAL(12, 3);
 ALTER TABLE movimento_estoque ALTER COLUMN quantidade TYPE DECIMAL(12, 3);
@@ -99,7 +99,31 @@ CREATE TABLE IF NOT EXISTS usuario (
     senha_hash VARCHAR(255) NOT NULL,
     role VARCHAR(20) NOT NULL DEFAULT 'OPERADOR' CHECK (role IN ('ADMIN', 'OPERADOR')),
     ativo BOOLEAN NOT NULL DEFAULT true,
-    data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    data_criacao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ============================================================================
+-- Segurança: bloqueia o acesso pela Data API do Supabase (chaves anon/authenticated)
+-- O servidor Next.js acessa pela conexão PostgreSQL direta e não é afetado.
+-- Para bancos já existentes, execute supabase/seguranca.sql.
+-- ============================================================================
+ALTER TABLE categoria ENABLE ROW LEVEL SECURITY;
+ALTER TABLE insumo ENABLE ROW LEVEL SECURITY;
+ALTER TABLE movimento_estoque ENABLE ROW LEVEL SECURITY;
+ALTER TABLE receita ENABLE ROW LEVEL SECURITY;
+ALTER TABLE forma ENABLE ROW LEVEL SECURITY;
+ALTER TABLE receita_item ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ordem_producao ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuario ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON categoria, insumo, movimento_estoque, receita, forma, receita_item, ordem_producao, usuario FROM anon;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON categoria, insumo, movimento_estoque, receita, forma, receita_item, ordem_producao, usuario FROM authenticated;
+  END IF;
+END $$;
 
 

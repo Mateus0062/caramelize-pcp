@@ -13,6 +13,7 @@ import {
   formatDateTime,
   formatQty,
   formatUnitCost,
+  parseDecimal,
 } from "@/lib/format";
 import type {
   FormaComDetalhes,
@@ -25,6 +26,7 @@ interface EstoqueFormasViewProps {
   insumos: InsumoComDetalhes[];
   movimentos: MovimentoComDetalhes[];
   formas: FormaComDetalhes[];
+  isAdmin: boolean;
   onRefresh: () => Promise<void>;
   onToast: (msg: string, type?: "success" | "error") => void;
 }
@@ -33,6 +35,7 @@ export function EstoqueFormasView({
   insumos,
   movimentos,
   formas,
+  isAdmin,
   onRefresh,
   onToast,
 }: EstoqueFormasViewProps) {
@@ -68,9 +71,9 @@ export function EstoqueFormasView({
         body: JSON.stringify({
           insumoId: Number(insumoId),
           tipo,
-          quantidade: Number(quantidade.replace(",", ".")),
+          quantidade: parseDecimal(quantidade),
           custoUnitario: custoUnitario
-            ? Number(custoUnitario.replace(",", "."))
+            ? parseDecimal(custoUnitario)
             : null,
           atualizarPrecoInsumo: tipo === "COMPRA" && atualizarPreco,
           observacao: observacao.trim() || null,
@@ -103,7 +106,7 @@ export function EstoqueFormasView({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           nome: formaNome,
-          volumeMl: Number(formaVolume.replace(",", ".")),
+          volumeMl: parseDecimal(formaVolume),
           insumoId: Number(formaInsumoId),
         }),
       });
@@ -361,6 +364,7 @@ export function EstoqueFormasView({
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Form Nova Forma */}
+          {isAdmin && (
           <section className="lg:col-span-4 bg-creme-claro rounded-3xl border border-caramelo-200/70 p-5 sm:p-6 shadow-xs h-fit">
             <h3 className="font-display text-xl font-semibold text-cacau">
               Cadastrar Forma / Tamanho
@@ -428,9 +432,10 @@ export function EstoqueFormasView({
               </button>
             </form>
           </section>
+          )}
 
           {/* Lista de Formas */}
-          <section className="lg:col-span-8 grid grid-cols-1 sm:grid-cols-2 gap-4 h-fit">
+          <section className={`${isAdmin ? "lg:col-span-8" : "lg:col-span-12"} grid grid-cols-1 sm:grid-cols-2 gap-4 h-fit`}>
             {formas.map((f) => (
               <div
                 key={f.id}
@@ -448,14 +453,16 @@ export function EstoqueFormasView({
                       <p className="text-xs text-cacau-suave">{f.insumoNome}</p>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteForma(f)}
-                    className="p-1.5 rounded-lg text-cacau-suave hover:bg-red-100 hover:text-red-700 cursor-pointer"
-                    title="Excluir forma"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteForma(f)}
+                      className="p-1.5 rounded-lg text-cacau-suave hover:bg-red-100 hover:text-red-700 cursor-pointer"
+                      title="Excluir forma"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  )}
                 </div>
 
                 <div className="mt-4 pt-3 border-t border-caramelo-100 grid grid-cols-3 gap-2 text-center">
@@ -471,7 +478,7 @@ export function EstoqueFormasView({
                   </div>
                   <div>
                     <p className="text-[11px] text-cacau-suave">Em Estoque</p>
-                    <p className="text-sm font-bold text-cacau">
+                    <p className={`text-sm font-bold ${f.saldoAtual < 0 ? "text-red-700" : "text-cacau"}`}>
                       {formatQty(f.saldoAtual, "un")}
                     </p>
                   </div>

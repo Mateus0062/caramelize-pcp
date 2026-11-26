@@ -2,17 +2,19 @@
 
 import {
   AlertTriangle,
+  Ban,
   CheckCircle2,
   ClipboardList,
   Play,
   Plus,
+  RotateCcw,
   ShoppingCart,
   Trash2,
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { formatBRL, formatDate, formatQty } from "@/lib/format";
-import { calcularNecessidadesOrdem } from "@/lib/pcp-engine";
+import { formatBRL, formatDateOnly, formatQty, hojeISO, parseDecimal } from "@/lib/format";
+import { calcularNecessidadesOrdem, ordemAtiva, STATUS_LABEL } from "@/lib/pcp-engine";
 import type {
   FormaComDetalhes,
   OrdemProducaoComDetalhes,
@@ -25,6 +27,7 @@ interface ProducaoViewProps {
   ordens: OrdemProducaoComDetalhes[];
   receitas: ReceitaComDetalhes[];
   formas: FormaComDetalhes[];
+  isAdmin: boolean;
   onRefresh: () => Promise<void>;
   onToast: (msg: string, type?: "success" | "error") => void;
 }
@@ -33,6 +36,7 @@ export function ProducaoView({
   ordens,
   receitas,
   formas,
+  isAdmin,
   onRefresh,
   onToast,
 }: ProducaoViewProps) {
@@ -42,10 +46,9 @@ export function ProducaoView({
   const [quantidade, setQuantidade] = useState("10");
   const [precoVenda, setPrecoVenda] = useState("");
   const [observacao, setObservacao] = useState("");
-  const [dataPrevista, setDataPrevista] = useState(
-    new Date().toISOString().slice(0, 10),
-  );
+  const [dataPrevista, setDataPrevista] = useState(hojeISO);
   const [saving, setSaving] = useState(false);
+  const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
 
   const selectedReceita = useMemo(
     () => receitas.find((r) => String(r.id) === receitaId) ?? null,
@@ -74,7 +77,7 @@ export function ProducaoView({
     );
     setPrecoVenda(sim ? String(sim.precoSugeridoUnitario) : "");
     setObservacao("");
-    setDataPrevista(new Date().toISOString().slice(0, 10));
+    setDataPrevista(hojeISO());
     setModalOpen(true);
   };
 
@@ -99,9 +102,7 @@ export function ProducaoView({
           receitaId: Number(receitaId),
           formaId: Number(formaId),
           quantidadeUnidades: Number(quantidade),
-          precoVendaUnitario: precoVenda
-            ? Number(precoVenda.replace(",", "."))
-            : null,
+          precoVendaUnitario: precoVenda ? parseDecimal(precoVenda) : null,
           observacao: observacao.trim() || null,
           dataPrevista,
         }),
@@ -125,9 +126,23 @@ export function ProducaoView({
     op: OrdemProducaoComDetalhes,
     status: StatusOrdemProducao,
   ) => {
+    if (busyOrderId !== null) return;
     let permitirEstoqueNegativo = false;
+    if (status === "CANCELADA") {
+      const ok = confirm(
+        `Cancelar a OP #${op.id}? Nenhum insumo será baixado do estoque.`,
+      );
+      if (!ok) return;
+    }
     if (status === "CONCLUIDA") {
       if (!op.estoqueSuficiente) {
+        if (!isAdmin) {
+          onToast(
+            `Estoque insuficiente para a OP #${op.id}. Reponha os insumos ou peça a um administrador para concluir com baixa forçada.`,
+            "error",
+          );
+          return;
+        }
         const ok = confirm(
           `Atenção: há insumos com saldo abaixo do necessário para a OP #${op.id}. Deseja concluir mesmo assim e dar baixa no estoque?`,
         );
@@ -141,18 +156,19 @@ export function ProducaoView({
       }
     }
 
+    setBusyOrderId(op.id);
     try {
       const res = await fetch(`/api/ordens/${op.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status, permitirEstoqueNegativo }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Erro ao atualizar ordem");
       onToast(
         status === "CONCLUIDA"
           ? "Produção concluída e estoque atualizado automaticamente!"
-          : `Status atualizado para ${status.replace("_", " ")}.`,
+          : `Ordem agora está: ${STATUS_LABEL[status]}.`,
       );
       await onRefresh();
     } catch (err) {
@@ -160,6 +176,9 @@ export function ProducaoView({
         err instanceof Error ? err.message : "Erro ao atualizar status",
         "error",
       );
+      await onRefresh();
+    } finally {
+      setBusyOrderId(null);
     }
   };
 
@@ -239,9 +258,9 @@ export function ProducaoView({
                       </span>
                       <StatusBadge status={op.status} />
                       <span className="text-xs text-cacau-suave">
-                        Prevista: {formatDate(op.dataPrevista)}
+                        Prevista: {formatDateOnly(op.dataPrevista)}
                       </span>
-                      {!op.estoqueSuficiente && op.status !== "CONCLUIDA" && (
+                      {!op.estoqueSuficiente && ordemAtiva(op.status) && (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">
                           <AlertTriangle className="h-3.5 w-3.5" />
                           Falta insumo no estoque
@@ -263,27 +282,51 @@ export function ProducaoView({
                     {op.status === "PLANEJADA" && (
                       <button
                         type="button"
+                        disabled={busyOrderId !== null}
                         onClick={() => handleStatusChange(op, "EM_PRODUCAO")}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-100 text-amber-900 text-xs font-semibold hover:bg-amber-200 transition cursor-pointer"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-100 text-amber-900 text-xs font-semibold hover:bg-amber-200 transition cursor-pointer disabled:opacity-50 disabled:cursor-wait"
                       >
                         <Play className="h-3.5 w-3.5" />
                         Iniciar Produção
                       </button>
                     )}
-                    {(op.status === "PLANEJADA" ||
-                      op.status === "EM_PRODUCAO") && (
+                    {ordemAtiva(op.status) && (
                       <button
                         type="button"
+                        disabled={busyOrderId !== null}
                         onClick={() => handleStatusChange(op, "CONCLUIDA")}
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 transition cursor-pointer shadow-xs"
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 transition cursor-pointer shadow-xs disabled:opacity-50 disabled:cursor-wait"
                       >
                         <CheckCircle2 className="h-3.5 w-3.5" />
-                        Concluir & Baixar Estoque
+                        {busyOrderId === op.id ? "Processando..." : "Concluir & Baixar Estoque"}
                       </button>
                     )}
-                    {op.status !== "CONCLUIDA" && (
+                    {ordemAtiva(op.status) && (
                       <button
                         type="button"
+                        disabled={busyOrderId !== null}
+                        onClick={() => handleStatusChange(op, "CANCELADA")}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-caramelo-200 text-cacau-suave text-xs font-semibold hover:bg-stone-100 transition cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+                      >
+                        <Ban className="h-3.5 w-3.5" />
+                        Cancelar
+                      </button>
+                    )}
+                    {op.status === "CANCELADA" && (
+                      <button
+                        type="button"
+                        disabled={busyOrderId !== null}
+                        onClick={() => handleStatusChange(op, "PLANEJADA")}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-caramelo-200 text-cacau text-xs font-semibold hover:bg-caramelo-50 transition cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Reabrir
+                      </button>
+                    )}
+                    {isAdmin && op.status !== "CONCLUIDA" && (
+                      <button
+                        type="button"
+                        disabled={busyOrderId !== null}
                         onClick={() => handleDelete(op)}
                         className="p-2 rounded-xl border border-caramelo-200 text-cacau-suave hover:bg-red-100 hover:text-red-700 transition cursor-pointer"
                         title="Excluir ordem"
@@ -360,7 +403,9 @@ export function ProducaoView({
                             <td className="py-2 pr-3 font-semibold text-cacau">
                               {formatQty(nec.quantidadeNecessaria, nec.unidadeMedida)}
                             </td>
-                            <td className="py-2 pr-3 text-cacau-suave">
+                            <td
+                              className={`py-2 pr-3 ${nec.saldoDisponivel < 0 ? "text-red-700 font-semibold" : "text-cacau-suave"}`}
+                            >
                               {formatQty(nec.saldoDisponivel, nec.unidadeMedida)}
                             </td>
                             <td className="py-2 pr-3">

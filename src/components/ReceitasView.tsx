@@ -9,12 +9,13 @@ import {
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { formatBRL, formatQty, formatUnitCost } from "@/lib/format";
+import { formatBRL, formatQty, formatUnitCost, parseDecimal } from "@/lib/format";
 import type { InsumoComDetalhes, ReceitaComDetalhes } from "@/lib/types";
 
 interface ReceitasViewProps {
   receitas: ReceitaComDetalhes[];
   insumos: InsumoComDetalhes[];
+  isAdmin: boolean;
   onRefresh: () => Promise<void>;
   onToast: (msg: string, type?: "success" | "error") => void;
 }
@@ -27,6 +28,7 @@ interface DraftItem {
 export function ReceitasView({
   receitas,
   insumos,
+  isAdmin,
   onRefresh,
   onToast,
 }: ReceitasViewProps) {
@@ -48,7 +50,7 @@ export function ReceitasView({
   const previewCustoTotal = useMemo(() => {
     return itens.reduce((acc, it) => {
       const ins = insumoMap.get(it.insumoId);
-      const qtd = Number(it.quantidade.replace(",", ".")) || 0;
+      const qtd = parseDecimal(it.quantidade) || 0;
       return acc + (ins ? ins.custoUnitario * qtd : 0);
     }, 0);
   }, [itens, insumoMap]);
@@ -108,7 +110,7 @@ export function ReceitasView({
     const validItens = itens
       .map((it) => ({
         insumoId: Number(it.insumoId),
-        quantidade: Number(it.quantidade.replace(",", ".")),
+        quantidade: parseDecimal(it.quantidade),
       }))
       .filter((it) => it.insumoId > 0 && it.quantidade > 0);
 
@@ -122,8 +124,8 @@ export function ReceitasView({
       const payload = {
         nome,
         descricao: descricao.trim() || null,
-        rendimentoMl: Number(rendimentoMl.replace(",", ".")),
-        margemLucro: Number(margemLucro.replace(",", ".")),
+        rendimentoMl: parseDecimal(rendimentoMl),
+        margemLucro: parseDecimal(margemLucro),
         itens: validItens,
       };
       const url = editing ? `/api/receitas/${editing.id}` : "/api/receitas";
@@ -185,14 +187,16 @@ export function ReceitasView({
             Monte suas receitas a partir dos insumos cadastrados e veja o custo real e preço sugerido por tamanho de forma.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={openCreate}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-caramelo-600 text-sm font-semibold text-creme-claro hover:bg-caramelo-700 transition shadow-sm cursor-pointer self-start sm:self-auto"
-        >
-          <Plus className="h-4 w-4" />
-          Nova Receita
-        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={openCreate}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-caramelo-600 text-sm font-semibold text-creme-claro hover:bg-caramelo-700 transition shadow-sm cursor-pointer self-start sm:self-auto"
+          >
+            <Plus className="h-4 w-4" />
+            Nova Receita
+          </button>
+        )}
       </div>
 
       {/* Recipe Cards */}
@@ -246,6 +250,7 @@ export function ReceitasView({
                       {formatUnitCost(rec.custoPorMl)} / ml
                     </p>
                   </div>
+                  {isAdmin && (
                   <div className="flex flex-col gap-1">
                     <button
                       type="button"
@@ -264,6 +269,7 @@ export function ReceitasView({
                       <Trash2 className="h-4 w-4" />
                     </button>
                   </div>
+                  )}
                 </div>
               </div>
 
@@ -466,7 +472,7 @@ export function ReceitasView({
                 <div className="space-y-2.5">
                   {itens.map((row, idx) => {
                     const ins = insumoMap.get(row.insumoId);
-                    const qtdNum = Number(row.quantidade.replace(",", ".")) || 0;
+                    const qtdNum = parseDecimal(row.quantidade) || 0;
                     const subtotal = ins ? ins.custoUnitario * qtdNum : 0;
 
                     return (

@@ -1,218 +1,350 @@
 import fs from "node:fs";
 import path from "node:path";
-import { Pool } from "pg";
-import { hashPassword, verifyPassword, type SessionUser } from "./auth";
+import { DomainError } from "./errors";
+import { assertLocalModeAllowed, writeJsonAtomic } from "./local-store";
+import {
+  ADMIN_PASSWORD_MIN_LENGTH,
+  burnPasswordCheck,
+  hashPassword,
+  isPasswordOutdated,
+  LEGACY_DEFAULT_PASSWORD,
+  PASSWORD_MIN_LENGTH,
+  verifyPassword,
+} from "./password";
+import { getPool, hasDatabaseUrl } from "./pg";
 
-interface StoredUser {
+export type UserRole = "ADMIN" | "OPERADOR";
+
+export interface UserRecord {
   id: number;
   nome: string;
   email: string;
   senhaHash: string;
-  role: "ADMIN" | "OPERADOR";
+  role: UserRole;
   ativo: boolean;
   dataCriacao: string;
 }
 
+export type PublicUser = Omit<UserRecord, "senhaHash">;
+
 interface LocalUsersFile {
   nextId: number;
-  usuarios: StoredUser[];
+  usuarios: UserRecord[];
 }
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const USERS_FILE = path.join(DATA_DIR, "caramelize-users.json");
+const USER_COLUMNS = "id, nome, email, senha_hash, role, ativo, data_criacao";
 
-const DEFAULT_ADMIN_EMAIL = "admin@caramelize.com.br";
-const DEFAULT_ADMIN_PASS = "caramelize123";
-
-let authPool: Pool | null = null;
-let tableReadyPromise: Promise<void> | null = null;
-
-function hasDatabaseUrl(): boolean {
-  return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
+export function toPublicUser(user: UserRecord): PublicUser {
+  return {
+    id: user.id,
+    nome: user.nome,
+    email: user.email,
+    role: user.role,
+    ativo: user.ativo,
+    dataCriacao: user.dataCriacao,
+  };
 }
 
-function getPool(): Pool {
-  if (!authPool) {
-    authPool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DATABASE_URL?.includes("localhost")
-        ? false
-        : { rejectUnauthorized: false },
-    });
-  }
-  return authPool;
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
 }
 
-async function ensurePgUsuarioTable(): Promise<void> {
-  if (!tableReadyPromise) {
-    tableReadyPromise = (async () => {
-      const pool = getPool();
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS usuario (
-          id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-          nome VARCHAR(100) NOT NULL,
-          email VARCHAR(120) NOT NULL UNIQUE,
-          senha_hash VARCHAR(255) NOT NULL,
-          role VARCHAR(20) NOT NULL DEFAULT 'OPERADOR' CHECK (role IN ('ADMIN', 'OPERADOR')),
-          ativo BOOLEAN NOT NULL DEFAULT true,
-          data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-
-      // Se a tabela estiver vazia, cria o usuário administrador inicial
-      const countRes = await pool.query("SELECT COUNT(*)::int AS total FROM usuario");
-      if (Number(countRes.rows[0]?.total ?? 0) === 0) {
-        await pool.query(
-          `INSERT INTO usuario (nome, email, senha_hash, role, ativo)
-           VALUES ($1, $2, $3, 'ADMIN', true)
-           ON CONFLICT (email) DO NOTHING`,
-          [
-            "Administrador Caramelize",
-            DEFAULT_ADMIN_EMAIL,
-            hashPassword(DEFAULT_ADMIN_PASS),
-          ],
-        );
-      }
-    })().catch((err) => {
-      tableReadyPromise = null;
-      throw err;
-    });
-  }
-  await tableReadyPromise;
+function mapRow(row: Record<string, unknown>): UserRecord {
+  return {
+    id: Number(row.id),
+    nome: String(row.nome),
+    email: String(row.email),
+    senhaHash: String(row.senha_hash),
+    role: row.role as UserRole,
+    ativo: Boolean(row.ativo),
+    dataCriacao: new Date(row.data_criacao as string).toISOString(),
+  };
 }
 
+// ----------------------------------------------------------------------------
+// Modo local (arquivo JSON)
+// ----------------------------------------------------------------------------
 function readLocalUsers(): LocalUsersFile {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+  assertLocalModeAllowed();
   if (!fs.existsSync(USERS_FILE)) {
-    const initial: LocalUsersFile = {
-      nextId: 2,
-      usuarios: [
-        {
-          id: 1,
-          nome: "Administrador Caramelize",
-          email: DEFAULT_ADMIN_EMAIL,
-          senhaHash: hashPassword(DEFAULT_ADMIN_PASS),
-          role: "ADMIN",
-          ativo: true,
-          dataCriacao: new Date().toISOString(),
-        },
-      ],
-    };
-    fs.writeFileSync(USERS_FILE, JSON.stringify(initial, null, 2), "utf-8");
-    return initial;
+    return { nextId: 1, usuarios: [] };
   }
   return JSON.parse(fs.readFileSync(USERS_FILE, "utf-8")) as LocalUsersFile;
 }
 
 function writeLocalUsers(data: LocalUsersFile): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2), "utf-8");
+  assertLocalModeAllowed();
+  writeJsonAtomic(USERS_FILE, data);
 }
 
-export async function authenticateUser(
-  email: string,
-  password: string,
-): Promise<SessionUser | null> {
-  const normalizedEmail = email.trim().toLowerCase();
+// ----------------------------------------------------------------------------
+// Consultas
+// ----------------------------------------------------------------------------
+async function countUsers(): Promise<number> {
+  if (!hasDatabaseUrl()) return readLocalUsers().usuarios.length;
+  const res = await getPool().query("SELECT COUNT(*)::int AS total FROM usuario");
+  return Number(res.rows[0]?.total ?? 0);
+}
 
+export async function findUserByEmail(email: string): Promise<UserRecord | null> {
+  const normalized = normalizeEmail(email);
   if (!hasDatabaseUrl()) {
-    const store = readLocalUsers();
-    const user = store.usuarios.find(
-      (u) => u.ativo && u.email.toLowerCase() === normalizedEmail,
-    );
-    if (!user || !verifyPassword(password, user.senhaHash)) {
-      return null;
-    }
-    return {
-      id: user.id,
-      nome: user.nome,
-      email: user.email,
-      role: user.role,
-    };
+    return readLocalUsers().usuarios.find((u) => u.email.toLowerCase() === normalized) ?? null;
   }
-
-  await ensurePgUsuarioTable();
   const res = await getPool().query(
-    `SELECT id, nome, email, senha_hash, role, ativo
-     FROM usuario
-     WHERE LOWER(email) = $1 AND ativo = true
-     LIMIT 1`,
-    [normalizedEmail],
+    `SELECT ${USER_COLUMNS} FROM usuario WHERE LOWER(email) = $1 LIMIT 1`,
+    [normalized],
   );
-  if (res.rowCount === 0) return null;
-
-  const row = res.rows[0];
-  if (!verifyPassword(password, row.senha_hash)) {
-    return null;
-  }
-
-  return {
-    id: Number(row.id),
-    nome: row.nome,
-    email: row.email,
-    role: row.role as "ADMIN" | "OPERADOR",
-  };
+  return res.rowCount ? mapRow(res.rows[0]) : null;
 }
 
-export async function registerUser(input: {
+export async function findUserById(id: number): Promise<UserRecord | null> {
+  if (!hasDatabaseUrl()) {
+    return readLocalUsers().usuarios.find((u) => u.id === id) ?? null;
+  }
+  const res = await getPool().query(`SELECT ${USER_COLUMNS} FROM usuario WHERE id = $1`, [id]);
+  return res.rowCount ? mapRow(res.rows[0]) : null;
+}
+
+export async function listUsers(): Promise<PublicUser[]> {
+  if (!hasDatabaseUrl()) {
+    return readLocalUsers()
+      .usuarios.map(toPublicUser)
+      .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+  }
+  const res = await getPool().query(`SELECT ${USER_COLUMNS} FROM usuario ORDER BY nome`);
+  return res.rows.map((r) => toPublicUser(mapRow(r)));
+}
+
+async function countActiveAdmins(): Promise<number> {
+  if (!hasDatabaseUrl()) {
+    return readLocalUsers().usuarios.filter((u) => u.ativo && u.role === "ADMIN").length;
+  }
+  const res = await getPool().query(
+    "SELECT COUNT(*)::int AS total FROM usuario WHERE ativo = true AND role = 'ADMIN'",
+  );
+  return Number(res.rows[0]?.total ?? 0);
+}
+
+// ----------------------------------------------------------------------------
+// Escrita
+// ----------------------------------------------------------------------------
+async function insertUser(input: {
   nome: string;
   email: string;
-  password: string;
-}): Promise<SessionUser> {
-  const normalizedEmail = input.email.trim().toLowerCase();
+  senhaHash: string;
+  role: UserRole;
+}): Promise<UserRecord> {
+  const email = normalizeEmail(input.email);
   const nome = input.nome.trim();
-  const senhaHash = hashPassword(input.password);
 
   if (!hasDatabaseUrl()) {
     const store = readLocalUsers();
-    if (store.usuarios.some((u) => u.email.toLowerCase() === normalizedEmail)) {
-      throw new Error("Já existe uma conta cadastrada com este e-mail.");
+    if (store.usuarios.some((u) => u.email.toLowerCase() === email)) {
+      throw new DomainError("Já existe um usuário cadastrado com este e-mail.");
     }
-    const role = store.usuarios.length === 0 ? "ADMIN" : "OPERADOR";
-    const user: StoredUser = {
+    const user: UserRecord = {
       id: store.nextId++,
       nome,
-      email: normalizedEmail,
-      senhaHash,
-      role,
+      email,
+      senhaHash: input.senhaHash,
+      role: input.role,
       ativo: true,
       dataCriacao: new Date().toISOString(),
     };
     store.usuarios.push(user);
     writeLocalUsers(store);
-    return {
-      id: user.id,
-      nome: user.nome,
-      email: user.email,
-      role: user.role,
-    };
+    return user;
   }
 
-  await ensurePgUsuarioTable();
-  const pool = getPool();
-  const exists = await pool.query(
-    "SELECT 1 FROM usuario WHERE LOWER(email) = $1 LIMIT 1",
-    [normalizedEmail],
-  );
-  if (exists.rowCount && exists.rowCount > 0) {
-    throw new Error("Já existe uma conta cadastrada com este e-mail.");
-  }
-
-  const res = await pool.query(
+  const res = await getPool().query(
     `INSERT INTO usuario (nome, email, senha_hash, role, ativo)
-     VALUES ($1, $2, $3, 'OPERADOR', true)
-     RETURNING id, nome, email, role`,
-    [nome, normalizedEmail, senhaHash],
+     VALUES ($1, $2, $3, $4, true)
+     ON CONFLICT (email) DO NOTHING
+     RETURNING ${USER_COLUMNS}`,
+    [nome, email, input.senhaHash, input.role],
   );
-  const row = res.rows[0];
-  return {
-    id: Number(row.id),
-    nome: row.nome,
-    email: row.email,
-    role: row.role as "ADMIN" | "OPERADOR",
-  };
+  if (!res.rowCount) {
+    throw new DomainError("Já existe um usuário cadastrado com este e-mail.");
+  }
+  return mapRow(res.rows[0]);
+}
+
+async function writeUserFields(
+  id: number,
+  fields: { role?: UserRole; ativo?: boolean; senhaHash?: string },
+): Promise<UserRecord> {
+  if (!hasDatabaseUrl()) {
+    const store = readLocalUsers();
+    const user = store.usuarios.find((u) => u.id === id);
+    if (!user) throw new DomainError("Usuário não encontrado.");
+    if (fields.role !== undefined) user.role = fields.role;
+    if (fields.ativo !== undefined) user.ativo = fields.ativo;
+    if (fields.senhaHash !== undefined) user.senhaHash = fields.senhaHash;
+    writeLocalUsers(store);
+    return user;
+  }
+
+  const res = await getPool().query(
+    `UPDATE usuario
+     SET role = COALESCE($1, role),
+         ativo = COALESCE($2, ativo),
+         senha_hash = COALESCE($3, senha_hash)
+     WHERE id = $4
+     RETURNING ${USER_COLUMNS}`,
+    [fields.role ?? null, fields.ativo ?? null, fields.senhaHash ?? null, id],
+  );
+  if (!res.rowCount) throw new DomainError("Usuário não encontrado.");
+  return mapRow(res.rows[0]);
+}
+
+function assertNewPasswordAllowed(novaSenha: string, senhaAtual?: string): void {
+  if (novaSenha.length < PASSWORD_MIN_LENGTH) {
+    throw new DomainError(`A senha deve ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres.`);
+  }
+  if (novaSenha === LEGACY_DEFAULT_PASSWORD) {
+    throw new DomainError("Esta senha é pública e não pode ser usada. Escolha outra.");
+  }
+  if (senhaAtual !== undefined && novaSenha === senhaAtual) {
+    throw new DomainError("A nova senha deve ser diferente da atual.");
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Administrador inicial (a partir de variáveis de ambiente)
+// ----------------------------------------------------------------------------
+let initialAdminPromise: Promise<void> | null = null;
+
+/**
+ * Se não existe nenhum usuário, cria o administrador definido em
+ * ADMIN_EMAIL / ADMIN_PASSWORD (/ ADMIN_NAME). Não há mais senha padrão.
+ */
+export async function ensureInitialAdmin(): Promise<void> {
+  initialAdminPromise ??= (async () => {
+    if ((await countUsers()) > 0) return;
+
+    const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+    const password = process.env.ADMIN_PASSWORD ?? "";
+    const nome = process.env.ADMIN_NAME?.trim() || "Administrador";
+
+    if (!email || !password) {
+      console.warn(
+        "[auth] Nenhum usuário cadastrado. Defina ADMIN_EMAIL e ADMIN_PASSWORD para criar o administrador inicial.",
+      );
+      return;
+    }
+    if (password.length < ADMIN_PASSWORD_MIN_LENGTH || password === LEGACY_DEFAULT_PASSWORD) {
+      console.error(
+        `[auth] ADMIN_PASSWORD precisa ter pelo menos ${ADMIN_PASSWORD_MIN_LENGTH} caracteres e não pode ser a senha padrão antiga. Administrador NÃO criado.`,
+      );
+      return;
+    }
+
+    await insertUser({ nome, email, senhaHash: await hashPassword(password), role: "ADMIN" });
+    console.info(`[auth] Administrador inicial criado: ${email}`);
+  })().catch((err) => {
+    initialAdminPromise = null;
+    throw err;
+  });
+  await initialAdminPromise;
+}
+
+// ----------------------------------------------------------------------------
+// Casos de uso
+// ----------------------------------------------------------------------------
+export type AuthResult =
+  | { status: "ok"; user: UserRecord }
+  | { status: "invalid" }
+  | { status: "must_change_password" };
+
+export async function authenticateUser(email: string, password: string): Promise<AuthResult> {
+  await ensureInitialAdmin();
+
+  const user = await findUserByEmail(email);
+  if (!user || !user.ativo) {
+    await burnPasswordCheck(password);
+    return { status: "invalid" };
+  }
+  if (!(await verifyPassword(password, user.senhaHash))) {
+    return { status: "invalid" };
+  }
+  if (isPasswordOutdated(password)) {
+    return { status: "must_change_password" };
+  }
+  return { status: "ok", user };
+}
+
+/** Troca de senha pelo próprio usuário (exige a senha atual). */
+export async function changeOwnPassword(
+  email: string,
+  senhaAtual: string,
+  novaSenha: string,
+): Promise<UserRecord | null> {
+  const user = await findUserByEmail(email);
+  if (!user || !user.ativo) {
+    await burnPasswordCheck(senhaAtual);
+    return null;
+  }
+  if (!(await verifyPassword(senhaAtual, user.senhaHash))) {
+    return null;
+  }
+  assertNewPasswordAllowed(novaSenha, senhaAtual);
+  return writeUserFields(user.id, { senhaHash: await hashPassword(novaSenha) });
+}
+
+/** Criação de usuário por um administrador. */
+export async function createUserByAdmin(input: {
+  nome: string;
+  email: string;
+  senha: string;
+  role: UserRole;
+}): Promise<PublicUser> {
+  assertNewPasswordAllowed(input.senha);
+  const user = await insertUser({
+    nome: input.nome,
+    email: input.email,
+    senhaHash: await hashPassword(input.senha),
+    role: input.role,
+  });
+  return toPublicUser(user);
+}
+
+/** Alteração de papel, status ou senha por um administrador. */
+export async function updateUserByAdmin(
+  actingUserId: number,
+  targetId: number,
+  changes: { role?: UserRole; ativo?: boolean; novaSenha?: string },
+): Promise<PublicUser> {
+  const target = await findUserById(targetId);
+  if (!target) throw new DomainError("Usuário não encontrado.");
+
+  const changesRole = changes.role !== undefined && changes.role !== target.role;
+  const changesAtivo = changes.ativo !== undefined && changes.ativo !== target.ativo;
+
+  if (targetId === actingUserId && (changesRole || changesAtivo)) {
+    throw new DomainError("Você não pode alterar o próprio papel nem desativar a própria conta.");
+  }
+
+  const removesAdmin =
+    target.role === "ADMIN" &&
+    target.ativo &&
+    ((changesRole && changes.role !== "ADMIN") || (changesAtivo && changes.ativo === false));
+  if (removesAdmin && (await countActiveAdmins()) <= 1) {
+    throw new DomainError("O sistema precisa de pelo menos um administrador ativo.");
+  }
+
+  let senhaHash: string | undefined;
+  if (changes.novaSenha !== undefined) {
+    assertNewPasswordAllowed(changes.novaSenha);
+    senhaHash = await hashPassword(changes.novaSenha);
+  }
+
+  const updated = await writeUserFields(targetId, {
+    role: changesRole ? changes.role : undefined,
+    ativo: changesAtivo ? changes.ativo : undefined,
+    senhaHash,
+  });
+  return toPublicUser(updated);
 }
