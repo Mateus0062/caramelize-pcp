@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: var(--font-fraunces), Georgia, serif;
+  --font-sans: var(--font-dm-sans), system-ui, sans-serif;
+
+  /* Paleta Caramelize extraída da logo (#A9540A) */
+  --color-caramelo-50: #fdf7f0;
+  --color-caramelo-100: #faebd8;
+  --color-caramelo-200: #f3d4ae;
+  --color-caramelo-300: #e8b47d;
+  --color-caramelo-400: #db9048;
+  --color-caramelo-500: #c87322;
+  --color-caramelo-600: #a9540a;
+  --color-caramelo-700: #8a4308;
+  --color-caramelo-800: #653207;
+  --color-caramelo-900: #43220a;
+
+  /* Neutros quentes */
+  --color-creme: #fbf4ea;
+  --color-creme-claro: #fffcf7;
+  --color-cacau: #3a2314;
+  --color-cacau-suave: #7a6353;
+
+  --shadow-suave: 0 1px 2px rgb(58 35 20 / 0.04), 0 12px 32px -12px rgb(58 35 20 / 0.12);
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-creme);
+    color: var(--color-cacau);
+    font-family: var(--font-sans);
+    overflow-x: hidden;
+  }
+
+  ::selection {
+    background-color: var(--color-caramelo-600);
+    color: var(--color-creme-claro);
+  }
+}
+
+.font-display {
+  font-family: var(--font-display);
+}

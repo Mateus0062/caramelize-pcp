@@ -1,0 +1,226 @@
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
+import {
+  AppShell,
+  type ActiveTab,
+  type AuthUserInfo,
+} from "@/components/AppShell";
+import { DashboardView } from "@/components/DashboardView";
+import { EstoqueFormasView } from "@/components/EstoqueFormasView";
+import { InsumosView } from "@/components/InsumosView";
+import { ProducaoView } from "@/components/ProducaoView";
+import { ReceitasView } from "@/components/ReceitasView";
+import type {
+  Categoria,
+  DashboardResumo,
+  FormaComDetalhes,
+  InsumoComDetalhes,
+  MovimentoComDetalhes,
+  OrdemProducaoComDetalhes,
+  ReceitaComDetalhes,
+} from "@/lib/types";
+
+export default function HomePage() {
+  const router = useRouter();
+  const [activeTab, setActiveTab] = useState<ActiveTab>("dashboard");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [user, setUser] = useState<AuthUserInfo | null>(null);
+  const [toast, setToast] = useState<{
+    message: string;
+    type: "success" | "error";
+  } | null>(null);
+
+  const [dashboard, setDashboard] = useState<DashboardResumo | null>(null);
+  const [categorias, setCategorias] = useState<Categoria[]>([]);
+  const [insumos, setInsumos] = useState<InsumoComDetalhes[]>([]);
+  const [movimentos, setMovimentos] = useState<MovimentoComDetalhes[]>([]);
+  const [formas, setFormas] = useState<FormaComDetalhes[]>([]);
+  const [receitas, setReceitas] = useState<ReceitaComDetalhes[]>([]);
+  const [ordens, setOrdens] = useState<OrdemProducaoComDetalhes[]>([]);
+
+  const showToast = useCallback(
+    (message: string, type: "success" | "error" = "success") => {
+      setToast({ message, type });
+      setTimeout(() => {
+        setToast((prev) => (prev?.message === message ? null : prev));
+      }, 4000);
+    },
+    [],
+  );
+
+  const loadAll = useCallback(async () => {
+    try {
+      const meRes = await fetch("/api/auth/me", { cache: "no-store" });
+      if (meRes.status === 401) {
+        router.replace("/login");
+        return;
+      }
+      if (meRes.ok) {
+        const meData = await meRes.json();
+        setUser(meData.user ?? null);
+      }
+
+      const [dashRes, catRes, insRes, movRes, formRes, recRes, opRes] =
+        await Promise.all([
+          fetch("/api/dashboard", { cache: "no-store" }),
+          fetch("/api/categorias", { cache: "no-store" }),
+          fetch("/api/insumos", { cache: "no-store" }),
+          fetch("/api/movimentos", { cache: "no-store" }),
+          fetch("/api/formas", { cache: "no-store" }),
+          fetch("/api/receitas", { cache: "no-store" }),
+          fetch("/api/ordens", { cache: "no-store" }),
+        ]);
+
+      if (dashRes.status === 401) {
+        router.replace("/login");
+        return;
+      }
+
+      if (!dashRes.ok) {
+        const errBody = await dashRes.json().catch(() => ({}));
+        throw new Error(errBody.error || "Falha ao carregar dados do PCP");
+      }
+
+      const [dash, cats, ins, movs, fms, recs, ops] = await Promise.all([
+        dashRes.json(),
+        catRes.json(),
+        insRes.json(),
+        movRes.json(),
+        formRes.json(),
+        recRes.json(),
+        opRes.json(),
+      ]);
+
+      setDashboard(dash);
+      setCategorias(cats);
+      setInsumos(ins);
+      setMovimentos(movs);
+      setFormas(fms);
+      setReceitas(recs);
+      setOrdens(ops);
+      setError(null);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Erro inesperado ao carregar sistema",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.replace("/login");
+    router.refresh();
+  }, [router]);
+
+  useEffect(() => {
+    void loadAll();
+  }, [loadAll]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-creme flex items-center justify-center p-6">
+        <div className="text-center space-y-3">
+          <img
+            src="/marca-pudim.png"
+            alt="Caramelize"
+            className="h-16 w-16 mx-auto animate-pulse object-contain"
+          />
+          <p className="font-display text-xl font-semibold text-cacau">
+            Carregando Caramelize PCP...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !dashboard) {
+    return (
+      <div className="min-h-screen bg-creme flex items-center justify-center p-6">
+        <div className="bg-creme-claro rounded-3xl border border-red-200 p-6 max-w-md w-full text-center space-y-3">
+          <h2 className="font-display text-2xl font-semibold text-cacau">
+            Ops! Algo deu errado
+          </h2>
+          <p className="text-sm text-red-700">{error}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setLoading(true);
+              void loadAll();
+            }}
+            className="px-4 py-2 rounded-xl bg-caramelo-600 text-creme-claro text-sm font-semibold cursor-pointer"
+          >
+            Tentar novamente
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <AppShell
+      activeTab={activeTab}
+      onTabChange={setActiveTab}
+      storageMode={dashboard.storageMode}
+      alertCount={dashboard.insumosAbaixoMinimo}
+      activeOrdersCount={dashboard.ordensPlanejadas + dashboard.ordensEmProducao}
+      user={user}
+      onLogout={handleLogout}
+    >
+      {activeTab === "dashboard" && (
+        <DashboardView dashboard={dashboard} onNavigate={setActiveTab} />
+      )}
+      {activeTab === "insumos" && (
+        <InsumosView
+          insumos={insumos}
+          categorias={categorias}
+          onRefresh={loadAll}
+          onToast={showToast}
+        />
+      )}
+      {activeTab === "receitas" && (
+        <ReceitasView
+          receitas={receitas}
+          insumos={insumos}
+          onRefresh={loadAll}
+          onToast={showToast}
+        />
+      )}
+      {activeTab === "producao" && (
+        <ProducaoView
+          ordens={ordens}
+          receitas={receitas}
+          formas={formas}
+          onRefresh={loadAll}
+          onToast={showToast}
+        />
+      )}
+      {activeTab === "estoque" && (
+        <EstoqueFormasView
+          insumos={insumos}
+          movimentos={movimentos}
+          formas={formas}
+          onRefresh={loadAll}
+          onToast={showToast}
+        />
+      )}
+
+      {/* Toast Notification */}
+      {toast && (
+        <div
+          className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-2xl shadow-xl text-sm font-semibold border transition ${
+            toast.type === "error"
+              ? "bg-red-700 text-white border-red-800"
+              : "bg-cacau text-creme-claro border-caramelo-700"
+          }`}
+        >
+          {toast.message}
+        </div>
+      )}
+    </AppShell>
+  );
+}
