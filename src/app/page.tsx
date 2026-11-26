@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -7,6 +8,7 @@ import {
   type ActiveTab,
   type AuthUserInfo,
 } from "@/components/AppShell";
+import { ConfirmProvider } from "@/components/ConfirmDialog";
 import { DashboardView } from "@/components/DashboardView";
 import { EstoqueFormasView } from "@/components/EstoqueFormasView";
 import { InsumosView } from "@/components/InsumosView";
@@ -22,6 +24,14 @@ import type {
   OrdemProducaoComDetalhes,
   ReceitaComDetalhes,
 } from "@/lib/types";
+
+const ABAS: ActiveTab[] = ["dashboard", "insumos", "receitas", "producao", "estoque", "usuarios"];
+
+/** Aba indicada em ?aba=... (ou o painel, se ausente/inválida). */
+function abaDaUrl(): ActiveTab {
+  const aba = new URLSearchParams(window.location.search).get("aba");
+  return ABAS.includes(aba as ActiveTab) ? (aba as ActiveTab) : "dashboard";
+}
 
 export default function HomePage() {
   const router = useRouter();
@@ -132,13 +142,40 @@ export default function HomePage() {
     void loadAll();
   }, [loadAll]);
 
+  // A aba ativa fica na URL (?aba=producao): o F5 mantém a aba e os botões
+  // voltar/avançar do navegador funcionam.
+  const mudarAba = useCallback((aba: ActiveTab) => {
+    setActiveTab(aba);
+    const destino = aba === "dashboard" ? window.location.pathname : `?aba=${aba}`;
+    if (abaDaUrl() !== aba) window.history.pushState(null, "", destino);
+    window.scrollTo({ top: 0 });
+  }, []);
+
+  useEffect(() => {
+    const sincronizar = () => setActiveTab(abaDaUrl());
+    sincronizar();
+    window.addEventListener("popstate", sincronizar);
+    return () => window.removeEventListener("popstate", sincronizar);
+  }, []);
+
+  // Operador que abrir ?aba=usuarios cai no painel.
+  useEffect(() => {
+    if (user && activeTab === "usuarios" && user.role !== "ADMIN") {
+      setActiveTab("dashboard");
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, [user, activeTab]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-creme flex items-center justify-center p-6">
         <div className="text-center space-y-3">
-          <img
+          <Image
             src="/marca-pudim.png"
             alt="Caramelize"
+            width={64}
+            height={64}
+            priority
             className="h-16 w-16 mx-auto animate-pulse object-contain"
           />
           <p className="font-display text-xl font-semibold text-cacau">
@@ -175,9 +212,10 @@ export default function HomePage() {
   const isAdmin = user?.role === "ADMIN";
 
   return (
+    <ConfirmProvider>
     <AppShell
       activeTab={activeTab}
-      onTabChange={setActiveTab}
+      onTabChange={mudarAba}
       storageMode={dashboard.storageMode}
       alertCount={dashboard.insumosAbaixoMinimo}
       activeOrdersCount={dashboard.ordensPlanejadas + dashboard.ordensEmProducao}
@@ -185,7 +223,7 @@ export default function HomePage() {
       onLogout={handleLogout}
     >
       {activeTab === "dashboard" && (
-        <DashboardView dashboard={dashboard} onNavigate={setActiveTab} />
+        <DashboardView dashboard={dashboard} onNavigate={mudarAba} />
       )}
       {activeTab === "insumos" && (
         <InsumosView
@@ -232,9 +270,18 @@ export default function HomePage() {
         <UsuariosView currentUserId={user.id} onToast={showToast} />
       )}
 
-      {/* Toast Notification */}
+      {/* Avisos para leitores de tela: regiões sempre presentes, anunciam ao mudar */}
+      <div role="status" aria-live="polite" className="sr-only">
+        {toast?.type === "success" ? toast.message : ""}
+      </div>
+      <div role="alert" aria-live="assertive" className="sr-only">
+        {toast?.type === "error" ? toast.message : ""}
+      </div>
+
+      {/* Toast visual */}
       {toast && (
         <div
+          aria-hidden="true"
           className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-2xl shadow-xl text-sm font-semibold border transition ${
             toast.type === "error"
               ? "bg-red-700 text-white border-red-800"
@@ -245,5 +292,6 @@ export default function HomePage() {
         </div>
       )}
     </AppShell>
+    </ConfirmProvider>
   );
 }

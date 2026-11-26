@@ -2,6 +2,7 @@
 
 import { KeyRound, Plus, UserCheck, UserX } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { useConfirm } from "./ConfirmDialog";
 import { formatDate } from "@/lib/format";
 
 type Role = "ADMIN" | "OPERADOR";
@@ -28,6 +29,7 @@ const labelClass =
   "block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5";
 
 export function UsuariosView({ currentUserId, onToast }: UsuariosViewProps) {
+  const confirmar = useConfirm();
   const [usuarios, setUsuarios] = useState<Usuario[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -107,9 +109,15 @@ export function UsuariosView({ currentUserId, onToast }: UsuariosViewProps) {
     }
   };
 
-  const handleToggleAtivo = (u: Usuario) => {
-    const acao = u.ativo ? "desativar" : "reativar";
-    if (!confirm(`Deseja ${acao} o acesso de ${u.nome}?`)) return;
+  const handleToggleAtivo = async (u: Usuario) => {
+    const ok = await confirmar({
+      titulo: u.ativo ? "Desativar acesso" : "Reativar acesso",
+      mensagem: u.ativo
+        ? `${u.nome} não conseguirá mais entrar, e as sessões abertas serão encerradas.`
+        : `${u.nome} voltará a ter acesso ao sistema.`,
+      textoConfirmar: u.ativo ? "Desativar" : "Reativar",
+    });
+    if (!ok) return;
     void patchUsuario(
       u,
       { ativo: !u.ativo },
@@ -328,7 +336,7 @@ export function UsuariosView({ currentUserId, onToast }: UsuariosViewProps) {
                         <button
                           type="button"
                           disabled={busy}
-                          onClick={() => handleToggleAtivo(u)}
+                          onClick={() => void handleToggleAtivo(u)}
                           className={`p-2 rounded-xl text-cacau-suave transition cursor-pointer ml-1 disabled:opacity-60 ${
                             u.ativo
                               ? "hover:bg-red-100 hover:text-red-700"

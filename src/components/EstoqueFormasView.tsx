@@ -8,6 +8,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useState } from "react";
+import { useConfirm } from "./ConfirmDialog";
 import {
   formatBRL,
   formatDateTime,
@@ -15,6 +16,7 @@ import {
   formatUnitCost,
   parseDecimal,
 } from "@/lib/format";
+import { calcularCustoMedioPonderado } from "@/lib/pcp-engine";
 import type {
   FormaComDetalhes,
   InsumoComDetalhes,
@@ -46,6 +48,7 @@ export function EstoqueFormasView({
   onRefresh,
   onToast,
 }: EstoqueFormasViewProps) {
+  const confirmar = useConfirm();
   const [subTab, setSubTab] = useState<"movimentos" | "formas">("movimentos");
 
   // Form movimento
@@ -54,6 +57,7 @@ export function EstoqueFormasView({
   const [quantidade, setQuantidade] = useState("");
   const [custoUnitario, setCustoUnitario] = useState("");
   const [atualizarPreco, setAtualizarPreco] = useState(true);
+  const [metodoCusto, setMetodoCusto] = useState<"MEDIO" | "ULTIMO">("MEDIO");
   const [observacao, setObservacao] = useState("");
 
   // Form forma
@@ -64,6 +68,21 @@ export function EstoqueFormasView({
   const [saving, setSaving] = useState(false);
 
   const selectedInsumo = insumos.find((i) => String(i.id) === insumoId);
+
+  // Prévia do novo custo do insumo (mesma fórmula do servidor).
+  const qtdCompra = parseDecimal(quantidade);
+  const custoCompra = parseDecimal(custoUnitario);
+  const previaCusto =
+    tipo === "COMPRA" && atualizarPreco && selectedInsumo && qtdCompra > 0 && custoCompra >= 0
+      ? metodoCusto === "ULTIMO"
+        ? custoCompra
+        : calcularCustoMedioPonderado(
+            selectedInsumo.saldoAtual,
+            selectedInsumo.custoUnitario,
+            qtdCompra,
+            custoCompra,
+          )
+      : null;
   const insumosDisponiveisParaForma = insumos.filter(
     (i) => !formas.some((f) => f.insumoId === i.id),
   );
@@ -83,6 +102,7 @@ export function EstoqueFormasView({
             ? parseDecimal(custoUnitario)
             : null,
           atualizarPrecoInsumo: tipo === "COMPRA" && atualizarPreco,
+          metodoCusto,
           observacao: observacao.trim() || null,
         }),
       });
@@ -92,7 +112,11 @@ export function EstoqueFormasView({
       setQuantidade("");
       setCustoUnitario("");
       setObservacao("");
-      onToast("Movimentação registrada no estoque!");
+      onToast(
+        typeof data.novoCustoInsumo === "number"
+          ? `Compra registrada! Novo custo do insumo: ${formatUnitCost(data.novoCustoInsumo)}.`
+          : "Movimentação registrada no estoque!",
+      );
       await onRefresh();
     } catch (err) {
       onToast(
@@ -135,7 +159,13 @@ export function EstoqueFormasView({
   };
 
   const handleDeleteForma = async (f: FormaComDetalhes) => {
-    if (!confirm(`Remover a forma "${f.nome}"?`)) return;
+    const ok = await confirmar({
+      titulo: "Remover forma",
+      mensagem: `Remover a forma "${f.nome}"?`,
+      textoConfirmar: "Remover",
+      perigo: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/formas/${f.id}`, { method: "DELETE" });
       const data = await res.json();
@@ -204,10 +234,11 @@ export function EstoqueFormasView({
 
             <form onSubmit={handleCreateMovimento} className="mt-4 space-y-3.5">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
+                <label htmlFor="estoque-insumo" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
                   Insumo *
                 </label>
                 <select
+                  id="estoque-insumo"
                   required
                   value={insumoId}
                   onChange={(e) => setInsumoId(e.target.value)}
@@ -223,10 +254,11 @@ export function EstoqueFormasView({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
+                <label htmlFor="estoque-tipo-de-movimento" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
                   Tipo de Movimento *
                 </label>
                 <select
+                  id="estoque-tipo-de-movimento"
                   value={tipo}
                   onChange={(e) => setTipo(e.target.value as TipoMovimento)}
                   className="w-full px-3 py-2.5 rounded-xl bg-creme border border-caramelo-200 text-sm"
@@ -239,10 +271,11 @@ export function EstoqueFormasView({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
+                <label htmlFor="estoque-quantidade" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
                   Quantidade ({selectedInsumo?.unidadeMedida ?? "un"}) *
                 </label>
                 <input
+                  id="estoque-quantidade"
                   type="number"
                   step="0.01"
                   min="0.01"
@@ -257,10 +290,11 @@ export function EstoqueFormasView({
               {tipo === "COMPRA" && (
                 <>
                   <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
+                    <label htmlFor="estoque-novo-preco-unitario-r" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
                       Novo Preço Unitário (R$ / {selectedInsumo?.unidadeMedida ?? "un"})
                     </label>
                     <input
+                      id="estoque-novo-preco-unitario-r"
                       type="number"
                       step="0.0001"
                       min="0"
@@ -281,16 +315,48 @@ export function EstoqueFormasView({
                       onChange={(e) => setAtualizarPreco(e.target.checked)}
                       className="accent-caramelo-600 h-4 w-4"
                     />
-                    Atualizar preço do insumo com este valor
+                    Atualizar o custo do insumo com esta compra
                   </label>
+                  {atualizarPreco && (
+                    <fieldset className="space-y-1.5 pl-6">
+                      <legend className="sr-only">Como atualizar o custo do insumo</legend>
+                      <label className="flex items-center gap-2 text-xs text-cacau cursor-pointer">
+                        <input
+                          type="radio"
+                          name="metodo-custo"
+                          checked={metodoCusto === "MEDIO"}
+                          onChange={() => setMetodoCusto("MEDIO")}
+                          className="accent-caramelo-600 h-3.5 w-3.5"
+                        />
+                        Custo médio ponderado (recomendado)
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-cacau cursor-pointer">
+                        <input
+                          type="radio"
+                          name="metodo-custo"
+                          checked={metodoCusto === "ULTIMO"}
+                          onChange={() => setMetodoCusto("ULTIMO")}
+                          className="accent-caramelo-600 h-3.5 w-3.5"
+                        />
+                        Preço desta compra (último preço)
+                      </label>
+                      {previaCusto != null && (
+                        <p className="text-[11px] text-cacau-suave" aria-live="polite">
+                          Novo custo do insumo: <strong>{formatUnitCost(previaCusto)}</strong>
+                          {selectedInsumo && ` (hoje ${formatUnitCost(selectedInsumo.custoUnitario)})`}
+                        </p>
+                      )}
+                    </fieldset>
+                  )}
                 </>
               )}
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
+                <label htmlFor="estoque-observacao" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
                   Observação
                 </label>
                 <input
+                  id="estoque-observacao"
                   type="text"
                   value={observacao}
                   onChange={(e) => setObservacao(e.target.value)}
@@ -397,10 +463,11 @@ export function EstoqueFormasView({
 
             <form onSubmit={handleCreateForma} className="mt-4 space-y-3.5">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
+                <label htmlFor="estoque-nome-comercial" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
                   Nome Comercial *
                 </label>
                 <input
+                  id="estoque-nome-comercial"
                   type="text"
                   required
                   value={formaNome}
@@ -411,10 +478,11 @@ export function EstoqueFormasView({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
+                <label htmlFor="estoque-volume-de-massa-ml" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
                   Volume de Massa (ml) *
                 </label>
                 <input
+                  id="estoque-volume-de-massa-ml"
                   type="number"
                   min="1"
                   required
@@ -426,10 +494,11 @@ export function EstoqueFormasView({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
+                <label htmlFor="estoque-insumo-da-embalagem" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1">
                   Insumo da Embalagem *
                 </label>
                 <select
+                  id="estoque-insumo-da-embalagem"
                   required
                   value={formaInsumoId}
                   onChange={(e) => setFormaInsumoId(e.target.value)}
@@ -481,6 +550,7 @@ export function EstoqueFormasView({
                       onClick={() => handleDeleteForma(f)}
                       className="p-1.5 rounded-lg text-cacau-suave hover:bg-red-100 hover:text-red-700 cursor-pointer"
                       title="Excluir forma"
+                      aria-label="Excluir forma"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>

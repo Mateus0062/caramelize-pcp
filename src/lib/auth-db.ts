@@ -1,7 +1,7 @@
-import fs from "node:fs";
-import path from "node:path";
+import { and, asc, eq, sql } from "drizzle-orm";
+import { getDb } from "../db/client";
+import { usuario } from "../db/schema";
 import { DomainError } from "./errors";
-import { assertLocalModeAllowed, writeJsonAtomic } from "./local-store";
 import {
   ADMIN_PASSWORD_MIN_LENGTH,
   burnPasswordCheck,
@@ -11,7 +11,6 @@ import {
   PASSWORD_MIN_LENGTH,
   verifyPassword,
 } from "./password";
-import { getPool, hasDatabaseUrl } from "./pg";
 
 export type UserRole = "ADMIN" | "OPERADOR";
 
@@ -26,15 +25,6 @@ export interface UserRecord {
 }
 
 export type PublicUser = Omit<UserRecord, "senhaHash">;
-
-interface LocalUsersFile {
-  nextId: number;
-  usuarios: UserRecord[];
-}
-
-const DATA_DIR = path.join(process.cwd(), "data");
-const USERS_FILE = path.join(DATA_DIR, "caramelize-users.json");
-const USER_COLUMNS = "id, nome, email, senha_hash, role, ativo, data_criacao";
 
 export function toPublicUser(user: UserRecord): PublicUser {
   return {
@@ -51,81 +41,54 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-function mapRow(row: Record<string, unknown>): UserRecord {
+function mapRow(r: typeof usuario.$inferSelect): UserRecord {
   return {
-    id: Number(row.id),
-    nome: String(row.nome),
-    email: String(row.email),
-    senhaHash: String(row.senha_hash),
-    role: row.role as UserRole,
-    ativo: Boolean(row.ativo),
-    dataCriacao: new Date(row.data_criacao as string).toISOString(),
+    id: r.id,
+    nome: r.nome,
+    email: r.email,
+    senhaHash: r.senhaHash,
+    role: r.role,
+    ativo: r.ativo,
+    dataCriacao: (r.dataCriacao ?? new Date(0)).toISOString(),
   };
 }
 
-// ----------------------------------------------------------------------------
-// Modo local (arquivo JSON)
-// ----------------------------------------------------------------------------
-function readLocalUsers(): LocalUsersFile {
-  assertLocalModeAllowed();
-  if (!fs.existsSync(USERS_FILE)) {
-    return { nextId: 1, usuarios: [] };
-  }
-  return JSON.parse(fs.readFileSync(USERS_FILE, "utf-8")) as LocalUsersFile;
-}
-
-function writeLocalUsers(data: LocalUsersFile): void {
-  assertLocalModeAllowed();
-  writeJsonAtomic(USERS_FILE, data);
-}
+const emailIgual = (email: string) => sql`LOWER(${usuario.email}) = ${normalizeEmail(email)}`;
 
 // ----------------------------------------------------------------------------
 // Consultas
 // ----------------------------------------------------------------------------
 async function countUsers(): Promise<number> {
-  if (!hasDatabaseUrl()) return readLocalUsers().usuarios.length;
-  const res = await getPool().query("SELECT COUNT(*)::int AS total FROM usuario");
-  return Number(res.rows[0]?.total ?? 0);
+  const db = await getDb();
+  const [r] = await db.select({ total: sql<number>`COUNT(*)::int` }).from(usuario);
+  return Number(r?.total ?? 0);
 }
 
 export async function findUserByEmail(email: string): Promise<UserRecord | null> {
-  const normalized = normalizeEmail(email);
-  if (!hasDatabaseUrl()) {
-    return readLocalUsers().usuarios.find((u) => u.email.toLowerCase() === normalized) ?? null;
-  }
-  const res = await getPool().query(
-    `SELECT ${USER_COLUMNS} FROM usuario WHERE LOWER(email) = $1 LIMIT 1`,
-    [normalized],
-  );
-  return res.rowCount ? mapRow(res.rows[0]) : null;
+  const db = await getDb();
+  const [r] = await db.select().from(usuario).where(emailIgual(email)).limit(1);
+  return r ? mapRow(r) : null;
 }
 
 export async function findUserById(id: number): Promise<UserRecord | null> {
-  if (!hasDatabaseUrl()) {
-    return readLocalUsers().usuarios.find((u) => u.id === id) ?? null;
-  }
-  const res = await getPool().query(`SELECT ${USER_COLUMNS} FROM usuario WHERE id = $1`, [id]);
-  return res.rowCount ? mapRow(res.rows[0]) : null;
+  const db = await getDb();
+  const [r] = await db.select().from(usuario).where(eq(usuario.id, id)).limit(1);
+  return r ? mapRow(r) : null;
 }
 
 export async function listUsers(): Promise<PublicUser[]> {
-  if (!hasDatabaseUrl()) {
-    return readLocalUsers()
-      .usuarios.map(toPublicUser)
-      .sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
-  }
-  const res = await getPool().query(`SELECT ${USER_COLUMNS} FROM usuario ORDER BY nome`);
-  return res.rows.map((r) => toPublicUser(mapRow(r)));
+  const db = await getDb();
+  const rows = await db.select().from(usuario).orderBy(asc(usuario.nome));
+  return rows.map((r) => toPublicUser(mapRow(r)));
 }
 
 async function countActiveAdmins(): Promise<number> {
-  if (!hasDatabaseUrl()) {
-    return readLocalUsers().usuarios.filter((u) => u.ativo && u.role === "ADMIN").length;
-  }
-  const res = await getPool().query(
-    "SELECT COUNT(*)::int AS total FROM usuario WHERE ativo = true AND role = 'ADMIN'",
-  );
-  return Number(res.rows[0]?.total ?? 0);
+  const db = await getDb();
+  const [r] = await db
+    .select({ total: sql<number>`COUNT(*)::int` })
+    .from(usuario)
+    .where(and(eq(usuario.ativo, true), eq(usuario.role, "ADMIN")));
+  return Number(r?.total ?? 0);
 }
 
 // ----------------------------------------------------------------------------
@@ -137,67 +100,31 @@ async function insertUser(input: {
   senhaHash: string;
   role: UserRole;
 }): Promise<UserRecord> {
-  const email = normalizeEmail(input.email);
-  const nome = input.nome.trim();
-
-  if (!hasDatabaseUrl()) {
-    const store = readLocalUsers();
-    if (store.usuarios.some((u) => u.email.toLowerCase() === email)) {
-      throw new DomainError("Já existe um usuário cadastrado com este e-mail.");
-    }
-    const user: UserRecord = {
-      id: store.nextId++,
-      nome,
-      email,
+  const db = await getDb();
+  if (await findUserByEmail(input.email)) {
+    throw new DomainError("Já existe um usuário cadastrado com este e-mail.");
+  }
+  const [r] = await db
+    .insert(usuario)
+    .values({
+      nome: input.nome.trim(),
+      email: normalizeEmail(input.email),
       senhaHash: input.senhaHash,
       role: input.role,
       ativo: true,
-      dataCriacao: new Date().toISOString(),
-    };
-    store.usuarios.push(user);
-    writeLocalUsers(store);
-    return user;
-  }
-
-  const res = await getPool().query(
-    `INSERT INTO usuario (nome, email, senha_hash, role, ativo)
-     VALUES ($1, $2, $3, $4, true)
-     ON CONFLICT (email) DO NOTHING
-     RETURNING ${USER_COLUMNS}`,
-    [nome, email, input.senhaHash, input.role],
-  );
-  if (!res.rowCount) {
-    throw new DomainError("Já existe um usuário cadastrado com este e-mail.");
-  }
-  return mapRow(res.rows[0]);
+    })
+    .returning();
+  return mapRow(r);
 }
 
 async function writeUserFields(
   id: number,
   fields: { role?: UserRole; ativo?: boolean; senhaHash?: string },
 ): Promise<UserRecord> {
-  if (!hasDatabaseUrl()) {
-    const store = readLocalUsers();
-    const user = store.usuarios.find((u) => u.id === id);
-    if (!user) throw new DomainError("Usuário não encontrado.");
-    if (fields.role !== undefined) user.role = fields.role;
-    if (fields.ativo !== undefined) user.ativo = fields.ativo;
-    if (fields.senhaHash !== undefined) user.senhaHash = fields.senhaHash;
-    writeLocalUsers(store);
-    return user;
-  }
-
-  const res = await getPool().query(
-    `UPDATE usuario
-     SET role = COALESCE($1, role),
-         ativo = COALESCE($2, ativo),
-         senha_hash = COALESCE($3, senha_hash)
-     WHERE id = $4
-     RETURNING ${USER_COLUMNS}`,
-    [fields.role ?? null, fields.ativo ?? null, fields.senhaHash ?? null, id],
-  );
-  if (!res.rowCount) throw new DomainError("Usuário não encontrado.");
-  return mapRow(res.rows[0]);
+  const db = await getDb();
+  const [r] = await db.update(usuario).set(fields).where(eq(usuario.id, id)).returning();
+  if (!r) throw new DomainError("Usuário não encontrado.");
+  return mapRow(r);
 }
 
 function assertNewPasswordAllowed(novaSenha: string, senhaAtual?: string): void {
@@ -219,7 +146,7 @@ let initialAdminPromise: Promise<void> | null = null;
 
 /**
  * Se não existe nenhum usuário, cria o administrador definido em
- * ADMIN_EMAIL / ADMIN_PASSWORD (/ ADMIN_NAME). Não há mais senha padrão.
+ * ADMIN_EMAIL / ADMIN_PASSWORD (/ ADMIN_NAME). Não há senha padrão.
  */
 export async function ensureInitialAdmin(): Promise<void> {
   initialAdminPromise ??= (async () => {
@@ -335,16 +262,14 @@ export async function updateUserByAdmin(
     throw new DomainError("O sistema precisa de pelo menos um administrador ativo.");
   }
 
-  let senhaHash: string | undefined;
+  const fields: { role?: UserRole; ativo?: boolean; senhaHash?: string } = {};
+  if (changesRole) fields.role = changes.role;
+  if (changesAtivo) fields.ativo = changes.ativo;
   if (changes.novaSenha !== undefined) {
     assertNewPasswordAllowed(changes.novaSenha);
-    senhaHash = await hashPassword(changes.novaSenha);
+    fields.senhaHash = await hashPassword(changes.novaSenha);
   }
+  if (Object.keys(fields).length === 0) return toPublicUser(target);
 
-  const updated = await writeUserFields(targetId, {
-    role: changesRole ? changes.role : undefined,
-    ativo: changesAtivo ? changes.ativo : undefined,
-    senhaHash,
-  });
-  return toPublicUser(updated);
+  return toPublicUser(await writeUserFields(targetId, fields));
 }

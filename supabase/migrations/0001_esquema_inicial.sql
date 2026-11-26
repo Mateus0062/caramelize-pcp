@@ -1,6 +1,7 @@
 -- ============================================================================
--- Caramelize PCP — Schema PostgreSQL (Supabase)
--- Compatível com as migrations V1–V4 do projeto prodly + módulo de Ordens de Produção
+-- 0001 — Estrutura inicial do Caramelize PCP
+-- Idempotente: em bancos que já existiam (inclusive os criados pelo antigo
+-- back-end "prodly", migrations V1–V4), só acrescenta o que falta.
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS categoria (
@@ -76,22 +77,6 @@ CREATE TABLE IF NOT EXISTS ordem_producao (
     CONSTRAINT fk_op_forma FOREIGN KEY (forma_id) REFERENCES forma (id)
 );
 
--- ============================================================================
--- Migração segura caso as tabelas antigas do `prodly` (V1–V4) já existissem
--- ============================================================================
-ALTER TABLE forma ADD COLUMN IF NOT EXISTS nome VARCHAR(80);
-ALTER TABLE receita ADD COLUMN IF NOT EXISTS descricao VARCHAR(255);
-ALTER TABLE receita ADD COLUMN IF NOT EXISTS margem_lucro DECIMAL(5, 2) NOT NULL DEFAULT 65.00;
-ALTER TABLE receita ADD COLUMN IF NOT EXISTS data_atualizacao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
-ALTER TABLE insumo ALTER COLUMN custo_unitario TYPE DECIMAL(12, 4);
-ALTER TABLE insumo ALTER COLUMN estoque_minimo TYPE DECIMAL(12, 3);
-ALTER TABLE movimento_estoque ALTER COLUMN quantidade TYPE DECIMAL(12, 3);
-ALTER TABLE movimento_estoque ALTER COLUMN custo_unitario TYPE DECIMAL(12, 4);
-ALTER TABLE receita_item ALTER COLUMN quantidade TYPE DECIMAL(12, 3);
-
--- ============================================================================
--- Tabela de Usuários (Autenticação)
--- ============================================================================
 CREATE TABLE IF NOT EXISTS usuario (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     nome VARCHAR(100) NOT NULL,
@@ -102,40 +87,13 @@ CREATE TABLE IF NOT EXISTS usuario (
     data_criacao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- ============================================================================
--- Segurança: bloqueia o acesso pela Data API do Supabase (chaves anon/authenticated)
--- O servidor Next.js acessa pela conexão PostgreSQL direta e não é afetado.
--- Para bancos já existentes, execute supabase/seguranca.sql.
--- ============================================================================
-ALTER TABLE categoria ENABLE ROW LEVEL SECURITY;
-ALTER TABLE insumo ENABLE ROW LEVEL SECURITY;
-ALTER TABLE movimento_estoque ENABLE ROW LEVEL SECURITY;
-ALTER TABLE receita ENABLE ROW LEVEL SECURITY;
-ALTER TABLE forma ENABLE ROW LEVEL SECURITY;
-ALTER TABLE receita_item ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ordem_producao ENABLE ROW LEVEL SECURITY;
-ALTER TABLE usuario ENABLE ROW LEVEL SECURITY;
-
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
-    REVOKE ALL ON categoria, insumo, movimento_estoque, receita, forma, receita_item, ordem_producao, usuario FROM anon;
-  END IF;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-    REVOKE ALL ON categoria, insumo, movimento_estoque, receita, forma, receita_item, ordem_producao, usuario FROM authenticated;
-  END IF;
-END $$;
-
--- ============================================================================
--- Índices de desempenho (o PostgreSQL não indexa chaves estrangeiras sozinho).
--- Para bancos já existentes, execute supabase/indices.sql.
--- ============================================================================
-CREATE INDEX IF NOT EXISTS idx_movimento_data ON movimento_estoque (data_movimento DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_movimento_insumo ON movimento_estoque (insumo_id);
-CREATE INDEX IF NOT EXISTS idx_receita_item_insumo ON receita_item (insumo_id);
-CREATE INDEX IF NOT EXISTS idx_insumo_categoria ON insumo (categoria_id);
-CREATE INDEX IF NOT EXISTS idx_ordem_receita ON ordem_producao (receita_id);
-CREATE INDEX IF NOT EXISTS idx_ordem_forma ON ordem_producao (forma_id);
-CREATE INDEX IF NOT EXISTS idx_usuario_email_lower ON usuario (LOWER(email));
-
-
+-- Compatibilidade com tabelas criadas pelo antigo back-end "prodly" (V1–V4)
+ALTER TABLE forma ADD COLUMN IF NOT EXISTS nome VARCHAR(80);
+ALTER TABLE receita ADD COLUMN IF NOT EXISTS descricao VARCHAR(255);
+ALTER TABLE receita ADD COLUMN IF NOT EXISTS margem_lucro DECIMAL(5, 2) NOT NULL DEFAULT 65.00;
+ALTER TABLE receita ADD COLUMN IF NOT EXISTS data_atualizacao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE insumo ALTER COLUMN custo_unitario TYPE DECIMAL(12, 4);
+ALTER TABLE insumo ALTER COLUMN estoque_minimo TYPE DECIMAL(12, 3);
+ALTER TABLE movimento_estoque ALTER COLUMN quantidade TYPE DECIMAL(12, 3);
+ALTER TABLE movimento_estoque ALTER COLUMN custo_unitario TYPE DECIMAL(12, 4);
+ALTER TABLE receita_item ALTER COLUMN quantidade TYPE DECIMAL(12, 3);

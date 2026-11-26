@@ -11,6 +11,9 @@ import {
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useConfirm } from "./ConfirmDialog";
+import { useDialogo } from "./useDialogo";
+import { div } from "@/lib/decimal";
 import { formatBRL, formatQty, formatUnitCost, parseDecimal } from "@/lib/format";
 import type { Categoria, InsumoComDetalhes } from "@/lib/types";
 
@@ -31,6 +34,7 @@ export function InsumosView({
   onRefresh,
   onToast,
 }: InsumosViewProps) {
+  const confirmar = useConfirm();
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState<string>("all");
   const [onlyLow, setOnlyLow] = useState(false);
@@ -54,6 +58,8 @@ export function InsumosView({
   const [novaCategoria, setNovaCategoria] = useState("");
 
   const [saving, setSaving] = useState(false);
+  const insumoDialogoRef = useDialogo<HTMLDivElement>(modalOpen, () => setModalOpen(false));
+  const categoriaDialogoRef = useDialogo<HTMLDivElement>(catModalOpen, () => setCatModalOpen(false));
 
   const filtered = useMemo(() => {
     return insumos.filter((i) => {
@@ -98,7 +104,7 @@ export function InsumosView({
     const preco = parseDecimal(precoEmbalagem);
     const qtd = parseDecimal(qtdEmbalagem);
     if (preco > 0 && qtd > 0) {
-      setCustoUnitario((preco / qtd).toFixed(4));
+      setCustoUnitario(String(div(preco, qtd, 4)));
     }
   };
 
@@ -149,7 +155,13 @@ export function InsumosView({
   };
 
   const handleDeleteInsumo = async (ins: InsumoComDetalhes) => {
-    if (!confirm(`Deseja excluir o insumo "${ins.nome}"?`)) return;
+    const ok = await confirmar({
+      titulo: "Excluir insumo",
+      mensagem: `Excluir o insumo "${ins.nome}"? Se ele tiver histórico de estoque, será arquivado.`,
+      textoConfirmar: "Excluir",
+      perigo: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/insumos/${ins.id}`, { method: "DELETE" });
       const data = await res.json();
@@ -190,7 +202,13 @@ export function InsumosView({
   };
 
   const handleDeleteCategoria = async (cat: Categoria) => {
-    if (!confirm(`Excluir a categoria "${cat.nome}"?`)) return;
+    const ok = await confirmar({
+      titulo: "Excluir categoria",
+      mensagem: `Excluir a categoria "${cat.nome}"?`,
+      textoConfirmar: "Excluir",
+      perigo: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/categorias/${cat.id}`, {
         method: "DELETE",
@@ -250,6 +268,7 @@ export function InsumosView({
           <Search className="h-4 w-4 text-cacau-suave absolute left-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            aria-label="Buscar insumo"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Buscar insumo por nome ou categoria..."
@@ -257,6 +276,7 @@ export function InsumosView({
           />
         </div>
         <select
+          aria-label="Filtrar por categoria"
           value={catFilter}
           onChange={(e) => setCatFilter(e.target.value)}
           className="px-3.5 py-2.5 rounded-xl bg-creme border border-caramelo-200 text-sm text-cacau focus:outline-none focus:border-caramelo-500"
@@ -354,6 +374,7 @@ export function InsumosView({
                       onClick={() => openEdit(ins)}
                       className="p-2 rounded-xl text-cacau-suave hover:bg-caramelo-100 hover:text-caramelo-700 transition cursor-pointer"
                       title="Editar insumo e preço"
+                      aria-label="Editar insumo e preço"
                     >
                       <Edit3 className="h-4 w-4" />
                     </button>
@@ -362,6 +383,7 @@ export function InsumosView({
                       onClick={() => handleDeleteInsumo(ins)}
                       className="p-2 rounded-xl text-cacau-suave hover:bg-red-100 hover:text-red-700 transition cursor-pointer ml-1"
                       title="Excluir insumo"
+                      aria-label="Excluir insumo"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
@@ -390,26 +412,34 @@ export function InsumosView({
       {/* Modal Criar / Editar Insumo */}
       {modalOpen && (
         <div className="fixed inset-0 z-50 bg-cacau/45 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-creme-claro rounded-3xl border border-caramelo-200 max-w-xl w-full p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
+          <div
+            ref={insumoDialogoRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="insumo-modal-titulo"
+            className="bg-creme-claro rounded-3xl border border-caramelo-200 max-w-xl w-full p-6 shadow-2xl max-h-[92vh] overflow-y-auto"
+          >
             <div className="flex items-center justify-between pb-4 border-b border-caramelo-200/70">
-              <h3 className="font-display text-2xl font-semibold text-cacau">
+              <h3 id="insumo-modal-titulo" className="font-display text-2xl font-semibold text-cacau">
                 {editing ? "Editar Insumo" : "Novo Insumo"}
               </h3>
               <button
                 type="button"
                 onClick={() => setModalOpen(false)}
                 className="p-1.5 rounded-xl text-cacau-suave hover:bg-caramelo-100 cursor-pointer"
+                aria-label="Fechar"
               >
-                <X className="h-5 w-5" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
             <form onSubmit={handleSaveInsumo} className="mt-5 space-y-4">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                <label htmlFor="insumo-nome-do-insumo" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                   Nome do Insumo *
                 </label>
                 <input
+                  id="insumo-nome-do-insumo"
                   type="text"
                   required
                   value={nome}
@@ -421,10 +451,11 @@ export function InsumosView({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="insumo-categoria" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Categoria *
                   </label>
                   <select
+                    id="insumo-categoria"
                     required
                     value={categoriaId}
                     onChange={(e) => setCategoriaId(e.target.value)}
@@ -440,10 +471,11 @@ export function InsumosView({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="insumo-unidade-de-medida" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Unidade de Medida *
                   </label>
                   <select
+                    id="insumo-unidade-de-medida"
                     value={unidadeMedida}
                     onChange={(e) => setUnidadeMedida(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-creme border border-caramelo-200 text-sm text-cacau focus:outline-none focus:border-caramelo-500"
@@ -460,7 +492,7 @@ export function InsumosView({
               {/* Calculadora auxiliar de preço por embalagem */}
               <div className="rounded-2xl bg-caramelo-50/90 border border-caramelo-200/80 p-4">
                 <div className="flex items-center gap-2 text-caramelo-800 font-semibold text-xs uppercase tracking-wider">
-                  <Calculator className="h-4 w-4" />
+                  <Calculator className="h-4 w-4" aria-hidden="true" />
                   Calculadora por Embalagem (opcional)
                 </div>
                 <p className="text-xs text-cacau-suave mt-1">
@@ -471,6 +503,7 @@ export function InsumosView({
                     type="number"
                     step="0.01"
                     min="0"
+                    aria-label="Preço pago pela embalagem (R$)"
                     value={precoEmbalagem}
                     onChange={(e) => setPrecoEmbalagem(e.target.value)}
                     placeholder="Preço pago (R$)"
@@ -480,6 +513,7 @@ export function InsumosView({
                     type="number"
                     step="0.01"
                     min="0"
+                    aria-label={`Quantidade na embalagem (${unidadeMedida})`}
                     value={qtdEmbalagem}
                     onChange={(e) => setQtdEmbalagem(e.target.value)}
                     placeholder={`Qtd (${unidadeMedida})`}
@@ -497,10 +531,11 @@ export function InsumosView({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="insumo-preco-por-r" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Preço por {unidadeMedida} (R$) *
                   </label>
                   <input
+                    id="insumo-preco-por-r"
                     type="number"
                     step="0.0001"
                     min="0"
@@ -512,10 +547,11 @@ export function InsumosView({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="insumo-estoque-minimo" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Estoque Mínimo ({unidadeMedida}) *
                   </label>
                   <input
+                    id="insumo-estoque-minimo"
                     type="number"
                     step="0.01"
                     min="0"
@@ -529,10 +565,11 @@ export function InsumosView({
 
               {!editing && (
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="insumo-estoque-inicial-opcional" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Estoque Inicial ({unidadeMedida}) — opcional
                   </label>
                   <input
+                    id="insumo-estoque-inicial-opcional"
                     type="number"
                     step="0.01"
                     min="0"
@@ -568,23 +605,31 @@ export function InsumosView({
       {/* Modal Categorias */}
       {catModalOpen && (
         <div className="fixed inset-0 z-50 bg-cacau/45 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-creme-claro rounded-3xl border border-caramelo-200 max-w-md w-full p-6 shadow-2xl">
+          <div
+            ref={categoriaDialogoRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="categoria-modal-titulo"
+            className="bg-creme-claro rounded-3xl border border-caramelo-200 max-w-md w-full p-6 shadow-2xl"
+          >
             <div className="flex items-center justify-between pb-4 border-b border-caramelo-200/70">
-              <h3 className="font-display text-2xl font-semibold text-cacau">
+              <h3 id="categoria-modal-titulo" className="font-display text-2xl font-semibold text-cacau">
                 Categorias de Insumos
               </h3>
               <button
                 type="button"
                 onClick={() => setCatModalOpen(false)}
                 className="p-1.5 rounded-xl text-cacau-suave hover:bg-caramelo-100 cursor-pointer"
+                aria-label="Fechar"
               >
-                <X className="h-5 w-5" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
             <form onSubmit={handleCreateCategoria} className="mt-4 flex gap-2">
               <input
                 type="text"
+                aria-label="Nome da nova categoria"
                 value={novaCategoria}
                 onChange={(e) => setNovaCategoria(e.target.value)}
                 placeholder="Nova categoria (ex.: Caldas)"
@@ -611,6 +656,7 @@ export function InsumosView({
                     onClick={() => handleDeleteCategoria(c)}
                     className="p-1.5 rounded-lg text-cacau-suave hover:bg-red-100 hover:text-red-700 cursor-pointer"
                     title="Excluir categoria"
+                    aria-label="Excluir categoria"
                   >
                     <Trash2 className="h-4 w-4" />
                   </button>

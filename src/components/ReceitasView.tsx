@@ -9,6 +9,9 @@ import {
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useConfirm } from "./ConfirmDialog";
+import { useDialogo } from "./useDialogo";
+import { mul, soma } from "@/lib/decimal";
 import { formatBRL, formatQty, formatUnitCost, parseDecimal } from "@/lib/format";
 import type { InsumoComDetalhes, ReceitaComDetalhes } from "@/lib/types";
 
@@ -32,6 +35,7 @@ export function ReceitasView({
   onRefresh,
   onToast,
 }: ReceitasViewProps) {
+  const confirmar = useConfirm();
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<ReceitaComDetalhes | null>(null);
   const [nome, setNome] = useState("");
@@ -40,6 +44,7 @@ export function ReceitasView({
   const [margemLucro, setMargemLucro] = useState("65");
   const [itens, setItens] = useState<DraftItem[]>([]);
   const [saving, setSaving] = useState(false);
+  const receitaDialogoRef = useDialogo<HTMLDivElement>(modalOpen, () => setModalOpen(false));
 
   const insumoMap = useMemo(
     () => new Map(insumos.map((i) => [String(i.id), i])),
@@ -48,11 +53,14 @@ export function ReceitasView({
 
   // Cálculo em tempo real no modal enquanto monta a receita
   const previewCustoTotal = useMemo(() => {
-    return itens.reduce((acc, it) => {
-      const ins = insumoMap.get(it.insumoId);
-      const qtd = parseDecimal(it.quantidade) || 0;
-      return acc + (ins ? ins.custoUnitario * qtd : 0);
-    }, 0);
+    return soma(
+      itens.map((it) => {
+        const ins = insumoMap.get(it.insumoId);
+        const qtd = parseDecimal(it.quantidade) || 0;
+        return ins ? mul(ins.custoUnitario, qtd, 4) : 0;
+      }),
+      2,
+    );
   }, [itens, insumoMap]);
 
   const openCreate = () => {
@@ -157,7 +165,13 @@ export function ReceitasView({
   };
 
   const handleDelete = async (rec: ReceitaComDetalhes) => {
-    if (!confirm(`Deseja excluir a receita "${rec.nome}"?`)) return;
+    const ok = await confirmar({
+      titulo: "Excluir receita",
+      mensagem: `Excluir a receita "${rec.nome}"?`,
+      textoConfirmar: "Excluir",
+      perigo: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/receitas/${rec.id}`, { method: "DELETE" });
       const data = await res.json();
@@ -257,6 +271,7 @@ export function ReceitasView({
                       onClick={() => openEdit(rec)}
                       className="p-2 rounded-xl border border-caramelo-200 text-cacau-suave hover:bg-caramelo-100 hover:text-caramelo-700 transition cursor-pointer"
                       title="Editar receita"
+                      aria-label="Editar receita"
                     >
                       <Edit3 className="h-4 w-4" />
                     </button>
@@ -265,6 +280,7 @@ export function ReceitasView({
                       onClick={() => handleDelete(rec)}
                       className="p-2 rounded-xl border border-caramelo-200 text-cacau-suave hover:bg-red-100 hover:text-red-700 transition cursor-pointer"
                       title="Excluir receita"
+                      aria-label="Excluir receita"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
@@ -376,27 +392,35 @@ export function ReceitasView({
       {/* Modal Criar / Editar Receita */}
       {modalOpen && (
         <div className="fixed inset-0 z-50 bg-cacau/45 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-creme-claro rounded-3xl border border-caramelo-200 max-w-2xl w-full p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
+          <div
+            ref={receitaDialogoRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="receita-modal-titulo"
+            className="bg-creme-claro rounded-3xl border border-caramelo-200 max-w-2xl w-full p-6 shadow-2xl max-h-[92vh] overflow-y-auto"
+          >
             <div className="flex items-center justify-between pb-4 border-b border-caramelo-200/70">
-              <h3 className="font-display text-2xl font-semibold text-cacau">
+              <h3 id="receita-modal-titulo" className="font-display text-2xl font-semibold text-cacau">
                 {editing ? "Editar Receita" : "Nova Receita de Pudim"}
               </h3>
               <button
                 type="button"
                 onClick={() => setModalOpen(false)}
                 className="p-1.5 rounded-xl text-cacau-suave hover:bg-caramelo-100 cursor-pointer"
+                aria-label="Fechar"
               >
-                <X className="h-5 w-5" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
             <form onSubmit={handleSave} className="mt-5 space-y-5">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="receita-nome-da-receita" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Nome da Receita *
                   </label>
                   <input
+                    id="receita-nome-da-receita"
                     type="text"
                     required
                     value={nome}
@@ -407,10 +431,11 @@ export function ReceitasView({
                 </div>
 
                 <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="receita-descricao-notas-de-preparo" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Descrição / Notas de Preparo
                   </label>
                   <input
+                    id="receita-descricao-notas-de-preparo"
                     type="text"
                     value={descricao}
                     onChange={(e) => setDescricao(e.target.value)}
@@ -420,10 +445,11 @@ export function ReceitasView({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="receita-rendimento-total-da-massa-ml" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Rendimento Total da Massa (ml) *
                   </label>
                   <input
+                    id="receita-rendimento-total-da-massa-ml"
                     type="number"
                     step="1"
                     min="1"
@@ -436,10 +462,11 @@ export function ReceitasView({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="receita-margem-de-lucro-alvo" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Margem de Lucro Alvo (%) *
                   </label>
                   <input
+                    id="receita-margem-de-lucro-alvo"
                     type="number"
                     step="1"
                     min="0"
@@ -456,9 +483,9 @@ export function ReceitasView({
               {/* Lista de Ingredientes */}
               <div>
                 <div className="flex items-center justify-between mb-2.5">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-cacau-suave">
+                  <span id="receita-insumos-titulo" className="text-xs font-semibold uppercase tracking-wider text-cacau-suave">
                     Insumos da Receita *
-                  </label>
+                  </span>
                   <button
                     type="button"
                     onClick={addItemRow}
@@ -473,7 +500,7 @@ export function ReceitasView({
                   {itens.map((row, idx) => {
                     const ins = insumoMap.get(row.insumoId);
                     const qtdNum = parseDecimal(row.quantidade) || 0;
-                    const subtotal = ins ? ins.custoUnitario * qtdNum : 0;
+                    const subtotal = ins ? mul(ins.custoUnitario, qtdNum, 4) : 0;
 
                     return (
                       <div
@@ -481,6 +508,7 @@ export function ReceitasView({
                         className="grid grid-cols-12 gap-2 items-center p-2.5 rounded-2xl bg-creme border border-caramelo-200/70"
                       >
                         <select
+                          aria-label={`Insumo do item ${idx + 1}`}
                           value={row.insumoId}
                           onChange={(e) =>
                             updateItemRow(idx, { insumoId: e.target.value })
@@ -500,6 +528,7 @@ export function ReceitasView({
                             type="number"
                             step="0.01"
                             min="0"
+                            aria-label={`Quantidade do item ${idx + 1}`}
                             value={row.quantidade}
                             onChange={(e) =>
                               updateItemRow(idx, { quantidade: e.target.value })
@@ -522,6 +551,7 @@ export function ReceitasView({
                             onClick={() => removeItemRow(idx)}
                             className="p-1.5 rounded-lg text-cacau-suave hover:bg-red-100 hover:text-red-700 cursor-pointer"
                             title="Remover item"
+                            aria-label="Remover item"
                           >
                             <Trash2 className="h-4 w-4" />
                           </button>

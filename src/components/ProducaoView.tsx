@@ -9,12 +9,22 @@ import {
   Plus,
   RotateCcw,
   ShoppingCart,
+  Download,
   Trash2,
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useConfirm } from "./ConfirmDialog";
+import { useDialogo } from "./useDialogo";
+import { mul, soma, sub } from "@/lib/decimal";
 import { formatBRL, formatDateOnly, formatQty, hojeISO, parseDecimal } from "@/lib/format";
-import { calcularNecessidadesOrdem, ordemAtiva, STATUS_LABEL } from "@/lib/pcp-engine";
+import { baixarArquivo, gerarCsv, numeroCsv } from "@/lib/csv";
+import {
+  calcularNecessidadesOrdem,
+  montarListaDeCompras,
+  ordemAtiva,
+  STATUS_LABEL,
+} from "@/lib/pcp-engine";
 import type {
   FormaComDetalhes,
   OrdemProducaoComDetalhes,
@@ -40,6 +50,7 @@ export function ProducaoView({
   onRefresh,
   onToast,
 }: ProducaoViewProps) {
+  const confirmar = useConfirm();
   const [modalOpen, setModalOpen] = useState(false);
   const [receitaId, setReceitaId] = useState("");
   const [formaId, setFormaId] = useState("");
@@ -48,6 +59,7 @@ export function ProducaoView({
   const [observacao, setObservacao] = useState("");
   const [dataPrevista, setDataPrevista] = useState(hojeISO);
   const [saving, setSaving] = useState(false);
+  const ordemDialogoRef = useDialogo<HTMLDivElement>(modalOpen, () => setModalOpen(false));
   const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
 
   const selectedReceita = useMemo(
@@ -129,9 +141,12 @@ export function ProducaoView({
     if (busyOrderId !== null) return;
     let permitirEstoqueNegativo = false;
     if (status === "CANCELADA") {
-      const ok = confirm(
-        `Cancelar a OP #${op.id}? Nenhum insumo será baixado do estoque.`,
-      );
+      const ok = await confirmar({
+        titulo: `Cancelar a OP #${op.id}`,
+        mensagem: "Nenhum insumo será baixado do estoque. Você poderá reabrir a ordem depois.",
+        textoConfirmar: "Cancelar ordem",
+        perigo: true,
+      });
       if (!ok) return;
     }
     if (status === "CONCLUIDA") {
@@ -143,15 +158,20 @@ export function ProducaoView({
           );
           return;
         }
-        const ok = confirm(
-          `Atenção: há insumos com saldo abaixo do necessário para a OP #${op.id}. Deseja concluir mesmo assim e dar baixa no estoque?`,
-        );
+        const ok = await confirmar({
+          titulo: "Estoque insuficiente",
+          mensagem: `Há insumos com saldo abaixo do necessário para a OP #${op.id}. Concluir mesmo assim e dar baixa no estoque? O saldo desses insumos ficará negativo.`,
+          textoConfirmar: "Concluir mesmo assim",
+          perigo: true,
+        });
         if (!ok) return;
         permitirEstoqueNegativo = true;
       } else {
-        const ok = confirm(
-          `Concluir a OP #${op.id} (${op.quantidadeUnidades}x ${op.formaNome}) e dar baixa automática de todos os insumos no estoque?`,
-        );
+        const ok = await confirmar({
+          titulo: `Concluir a OP #${op.id}`,
+          mensagem: `${op.quantidadeUnidades}x ${op.formaNome}: todos os insumos serão baixados do estoque automaticamente.`,
+          textoConfirmar: "Concluir e baixar",
+        });
         if (!ok) return;
       }
     }
@@ -182,8 +202,37 @@ export function ProducaoView({
     }
   };
 
+  const exportarListaDeCompras = () => {
+    const lista = montarListaDeCompras(ordens);
+    if (lista.length === 0) {
+      onToast("Nada a comprar: o estoque cobre todas as ordens planejadas e em produção.");
+      return;
+    }
+    const csv = gerarCsv(
+      ["Insumo", "Unidade", "Necessário", "Em estoque", "Comprar", "Custo unitário (R$)", "Custo estimado (R$)"],
+      lista.map((i) => [
+        i.insumoNome,
+        i.unidadeMedida,
+        numeroCsv(i.necessario, 3),
+        numeroCsv(i.saldoAtual, 3),
+        numeroCsv(i.comprar, 3),
+        numeroCsv(i.custoUnitario, 4),
+        numeroCsv(i.custoEstimado, 2),
+      ]),
+    );
+    baixarArquivo(`lista-de-compras-${hojeISO()}.csv`, csv);
+    const total = soma(lista.map((i) => i.custoEstimado), 2);
+    onToast(`Lista com ${lista.length} insumo(s) exportada — custo estimado ${formatBRL(total)}.`);
+  };
+
   const handleDelete = async (op: OrdemProducaoComDetalhes) => {
-    if (!confirm(`Excluir a Ordem de Produção #${op.id}?`)) return;
+    const ok = await confirmar({
+      titulo: "Excluir ordem",
+      mensagem: `Excluir a Ordem de Produção #${op.id}?`,
+      textoConfirmar: "Excluir",
+      perigo: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/ordens/${op.id}`, { method: "DELETE" });
       const data = await res.json();
@@ -213,14 +262,25 @@ export function ProducaoView({
             Planeje lotes por tamanho de forma, confira a lista exata de ingredientes necessários e dê baixa automática no estoque ao concluir.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={openCreate}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-caramelo-600 text-sm font-semibold text-creme-claro hover:bg-caramelo-700 transition shadow-sm cursor-pointer self-start sm:self-auto"
-        >
-          <Plus className="h-4 w-4" />
-          Nova Ordem de Produção
-        </button>
+        <div className="flex flex-wrap gap-2.5 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={exportarListaDeCompras}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-caramelo-300 bg-creme-claro text-sm font-semibold text-cacau hover:bg-caramelo-50 transition cursor-pointer"
+            title="Soma o que falta comprar para todas as ordens planejadas e em produção"
+          >
+            <Download className="h-4 w-4 text-caramelo-600" aria-hidden="true" />
+            Lista de compras (CSV)
+          </button>
+          <button
+            type="button"
+            onClick={openCreate}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-caramelo-600 text-sm font-semibold text-creme-claro hover:bg-caramelo-700 transition shadow-sm cursor-pointer"
+          >
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            Nova Ordem de Produção
+          </button>
+        </div>
       </div>
 
       {/* Lista de Ordens */}
@@ -238,11 +298,11 @@ export function ProducaoView({
         <div className="space-y-5">
           {ordens.map((op) => {
             const receitaPrevista = op.precoVendaUnitario
-              ? op.precoVendaUnitario * op.quantidadeUnidades
+              ? mul(op.precoVendaUnitario, op.quantidadeUnidades, 2)
               : null;
             const lucroPrevisto =
               receitaPrevista != null
-                ? receitaPrevista - op.custoTotalEstimado
+                ? sub(receitaPrevista, op.custoTotalEstimado, 2)
                 : null;
 
             return (
@@ -330,6 +390,7 @@ export function ProducaoView({
                         onClick={() => handleDelete(op)}
                         className="p-2 rounded-xl border border-caramelo-200 text-cacau-suave hover:bg-red-100 hover:text-red-700 transition cursor-pointer"
                         title="Excluir ordem"
+                        aria-label="Excluir ordem"
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -442,27 +503,35 @@ export function ProducaoView({
       {/* Modal Nova Ordem de Produção */}
       {modalOpen && (
         <div className="fixed inset-0 z-50 bg-cacau/45 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-creme-claro rounded-3xl border border-caramelo-200 max-w-2xl w-full p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
+          <div
+            ref={ordemDialogoRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ordem-modal-titulo"
+            className="bg-creme-claro rounded-3xl border border-caramelo-200 max-w-2xl w-full p-6 shadow-2xl max-h-[92vh] overflow-y-auto"
+          >
             <div className="flex items-center justify-between pb-4 border-b border-caramelo-200/70">
-              <h3 className="font-display text-2xl font-semibold text-cacau">
+              <h3 id="ordem-modal-titulo" className="font-display text-2xl font-semibold text-cacau">
                 Planejar Ordem de Produção
               </h3>
               <button
                 type="button"
                 onClick={() => setModalOpen(false)}
                 className="p-1.5 rounded-xl text-cacau-suave hover:bg-caramelo-100 cursor-pointer"
+                aria-label="Fechar"
               >
-                <X className="h-5 w-5" />
+                <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
 
             <form onSubmit={handleCreate} className="mt-5 space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="ordem-receita" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Receita *
                   </label>
                   <select
+                    id="ordem-receita"
                     required
                     value={receitaId}
                     onChange={(e) =>
@@ -480,10 +549,11 @@ export function ProducaoView({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="ordem-forma-tamanho" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Forma / Tamanho *
                   </label>
                   <select
+                    id="ordem-forma-tamanho"
                     required
                     value={formaId}
                     onChange={(e) =>
@@ -501,10 +571,11 @@ export function ProducaoView({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="ordem-quantidade-de-unidades" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Quantidade de Unidades *
                   </label>
                   <input
+                    id="ordem-quantidade-de-unidades"
                     type="number"
                     min="1"
                     required
@@ -515,10 +586,11 @@ export function ProducaoView({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="ordem-preco-de-venda-unitario-r" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Preço de Venda Unitário (R$)
                   </label>
                   <input
+                    id="ordem-preco-de-venda-unitario-r"
                     type="number"
                     step="0.01"
                     min="0"
@@ -530,10 +602,11 @@ export function ProducaoView({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="ordem-data-prevista" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Data Prevista
                   </label>
                   <input
+                    id="ordem-data-prevista"
                     type="date"
                     value={dataPrevista}
                     onChange={(e) => setDataPrevista(e.target.value)}
@@ -542,10 +615,11 @@ export function ProducaoView({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
+                  <label htmlFor="ordem-observacao-cliente" className="block text-xs font-semibold uppercase tracking-wider text-cacau-suave mb-1.5">
                     Observação / Cliente
                   </label>
                   <input
+                    id="ordem-observacao-cliente"
                     type="text"
                     value={observacao}
                     onChange={(e) => setObservacao(e.target.value)}

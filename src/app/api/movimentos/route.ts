@@ -20,6 +20,8 @@ const schema = z.object({
     .optional(),
   observacao: z.string().max(255).nullable().optional(),
   atualizarPrecoInsumo: z.boolean().optional(),
+  /** MEDIO = custo médio ponderado (padrão); ULTIMO = preço da última compra. */
+  metodoCusto: z.enum(["MEDIO", "ULTIMO"]).optional(),
 });
 
 const paginaSchema = z.object({

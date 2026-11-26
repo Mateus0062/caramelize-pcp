@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { soma } from "./decimal";
 import { MAX_ITENS_RECEITA, MAX_QUANTIDADE } from "./limits";
 
 export const receitaSchema = z.object({
@@ -28,7 +29,7 @@ export function consolidarItens(
   for (const item of itens) {
     unicos.set(
       item.insumoId,
-      Number(((unicos.get(item.insumoId) ?? 0) + item.quantidade).toFixed(3)),
+      soma([unicos.get(item.insumoId) ?? 0, item.quantidade], 3),
     );
   }
   return Array.from(unicos.entries()).map(([insumoId, quantidade]) => ({ insumoId, quantidade }));

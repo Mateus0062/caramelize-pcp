@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { Eye, EyeOff, KeyRound, Lock, Mail } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -105,9 +106,12 @@ export default function LoginPage() {
       <div className="w-full max-w-md space-y-6">
         {/* Marca */}
         <div className="text-center">
-          <img
+          <Image
             src="/marca-pudim.png"
             alt="Caramelize"
+            width={64}
+            height={64}
+            priority
             className="h-16 w-16 mx-auto rounded-2xl object-contain bg-creme-claro p-2 border border-caramelo-200 shadow-xs"
           />
           <h1 className="font-display text-3xl sm:text-4xl font-semibold text-cacau mt-4">

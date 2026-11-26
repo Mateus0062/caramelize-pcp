@@ -16,6 +16,7 @@ import type {
   ReceitaItemComDetalhes,
   StatusOrdemProducao,
 } from "./types";
+import { arred, Big, div, mul, soma, sub } from "./decimal";
 
 // ============================================================================
 // Ciclo de vida da Ordem de Produção
@@ -63,15 +64,17 @@ export type SaldosMap = Map<number, number>;
 export function calcularSaldosMap(
   movimentos: MovimentoEstoque[],
 ): SaldosMap {
-  const saldos = new Map<number, number>();
+  const acumulado = new Map<number, Big>();
   for (const m of movimentos) {
-    const atual = saldos.get(m.insumoId) ?? 0;
-    const delta =
-      m.tipo === "COMPRA" || m.tipo === "AJUSTE_ENTRADA"
-        ? m.quantidade
-        : -m.quantidade;
-    saldos.set(m.insumoId, Number((atual + delta).toFixed(4)));
+    const atual = acumulado.get(m.insumoId) ?? new Big(0);
+    const qtd = new Big(Number.isFinite(m.quantidade) ? m.quantidade : 0);
+    acumulado.set(
+      m.insumoId,
+      m.tipo === "COMPRA" || m.tipo === "AJUSTE_ENTRADA" ? atual.plus(qtd) : atual.minus(qtd),
+    );
   }
+  const saldos: SaldosMap = new Map();
+  for (const [insumoId, valor] of acumulado) saldos.set(insumoId, arred(valor, 4));
   return saldos;
 }
 
@@ -87,7 +90,7 @@ export function enriquecerInsumos(
     .map((insumo) => {
       const saldoAtual = saldos.get(insumo.id) ?? 0;
       const abaixoMinimo = saldoAtual <= insumo.estoqueMinimo;
-      const valorEmEstoque = Number((Math.max(0, saldoAtual) * insumo.custoUnitario).toFixed(2));
+      const valorEmEstoque = mul(Math.max(0, saldoAtual), insumo.custoUnitario, 2);
       return {
         ...insumo,
         categoriaNome: catMap.get(insumo.categoriaId) ?? "Sem categoria",
@@ -145,9 +148,9 @@ export function calcularPrecoSugerido(
   custoUnitario: number,
   margemLucroPercent: number,
 ): number {
-  const margem = Math.min(Math.max(margemLucroPercent, 0), 95) / 100;
-  if (margem >= 1) return custoUnitario;
-  return Number((custoUnitario / (1 - margem)).toFixed(2));
+  const margem = Math.min(Math.max(margemLucroPercent, 0), 95);
+  // preço = custo / (1 - margem%)
+  return div(custoUnitario, sub(1, div(margem, 100, 6), 6), 2);
 }
 
 export function enriquecerReceitas(
@@ -171,7 +174,7 @@ export function enriquecerReceitas(
         .map((it) => {
           const ins = insumoMap.get(it.insumoId);
           const custoUnitario = ins?.custoUnitario ?? 0;
-          const custoSubtotal = Number((it.quantidade * custoUnitario).toFixed(4));
+          const custoSubtotal = mul(it.quantidade, custoUnitario, 4);
           return {
             ...it,
             insumoNome: ins?.nome ?? `Insumo #${it.insumoId}`,
@@ -182,28 +185,22 @@ export function enriquecerReceitas(
           };
         });
 
-      const custoTotal = Number(
-        itens.reduce((acc, item) => acc + item.custoSubtotal, 0).toFixed(2),
-      );
-      const custoPorMl = r.rendimentoMl > 0 ? custoTotal / r.rendimentoMl : 0;
+      const custoTotal = soma(itens.map((item) => item.custoSubtotal), 2);
+      // Custo por ml mantido em precisão total para as contas por forma.
+      const custoPorMlExato =
+        r.rendimentoMl > 0 ? new Big(custoTotal).div(r.rendimentoMl) : new Big(0);
+      const custoPorMl = arred(custoPorMlExato, 10);
 
       const simulacaoFormas = formasDet.map((forma) => {
-        const unidadesPorLote =
-          forma.volumeMl > 0
-            ? Number((r.rendimentoMl / forma.volumeMl).toFixed(2))
-            : 0;
-        const custoMassaUnitario = Number((custoPorMl * forma.volumeMl).toFixed(2));
-        const custoFormaUnitario = Number(forma.custoUnitario.toFixed(2));
-        const custoTotalUnitario = Number(
-          (custoMassaUnitario + custoFormaUnitario).toFixed(2),
-        );
+        const unidadesPorLote = div(r.rendimentoMl, forma.volumeMl, 2);
+        const custoMassaUnitario = mul(custoPorMlExato, forma.volumeMl, 2);
+        const custoFormaUnitario = arred(forma.custoUnitario, 2);
+        const custoTotalUnitario = soma([custoMassaUnitario, custoFormaUnitario], 2);
         const precoSugeridoUnitario = calcularPrecoSugerido(
           custoTotalUnitario,
           r.margemLucro,
         );
-        const lucroUnitario = Number(
-          (precoSugeridoUnitario - custoTotalUnitario).toFixed(2),
-        );
+        const lucroUnitario = sub(precoSugeridoUnitario, custoTotalUnitario, 2);
         return {
           formaId: forma.id,
           formaNome: forma.nome,
@@ -240,17 +237,14 @@ export function calcularNecessidadesOrdem(
   custoUnitario: number;
   estoqueSuficiente: boolean;
 } {
-  const volumeTotalMl = Number((quantidadeUnidades * forma.volumeMl).toFixed(2));
+  const volumeTotalMl = mul(quantidadeUnidades, forma.volumeMl, 2);
   const fatorEscala =
-    receita.rendimentoMl > 0 ? volumeTotalMl / receita.rendimentoMl : 0;
+    receita.rendimentoMl > 0 ? new Big(volumeTotalMl).div(receita.rendimentoMl) : new Big(0);
 
   const necessidades: NecessidadeInsumo[] = receita.itens.map((item) => {
-    const quantidadeNecessaria = Number((item.quantidade * fatorEscala).toFixed(3));
-    const falta = Math.max(
-      0,
-      Number((quantidadeNecessaria - item.saldoAtual).toFixed(3)),
-    );
-    const custoTotal = Number((quantidadeNecessaria * item.custoUnitario).toFixed(2));
+    const quantidadeNecessaria = mul(item.quantidade, fatorEscala, 3);
+    const falta = Math.max(0, sub(quantidadeNecessaria, item.saldoAtual, 3));
+    const custoTotal = mul(quantidadeNecessaria, item.custoUnitario, 2);
     return {
       insumoId: item.insumoId,
       insumoNome: item.insumoNome,
@@ -265,10 +259,7 @@ export function calcularNecessidadesOrdem(
   });
 
   // Adiciona a própria forma/embalagem como insumo necessário
-  const faltaForma = Math.max(
-    0,
-    Number((quantidadeUnidades - forma.saldoAtual).toFixed(3)),
-  );
+  const faltaForma = Math.max(0, sub(quantidadeUnidades, forma.saldoAtual, 3));
   necessidades.push({
     insumoId: forma.insumoId,
     insumoNome: forma.insumoNome,
@@ -277,22 +268,17 @@ export function calcularNecessidadesOrdem(
     saldoDisponivel: forma.saldoAtual,
     falta: faltaForma,
     custoUnitario: forma.custoUnitario,
-    custoTotal: Number((quantidadeUnidades * forma.custoUnitario).toFixed(2)),
+    custoTotal: mul(quantidadeUnidades, forma.custoUnitario, 2),
     ehForma: true,
   });
 
-  const custoTotalEstimado = Number(
-    necessidades.reduce((acc, n) => acc + n.custoTotal, 0).toFixed(2),
-  );
-  const custoUnitario =
-    quantidadeUnidades > 0
-      ? Number((custoTotalEstimado / quantidadeUnidades).toFixed(2))
-      : 0;
+  const custoTotalEstimado = soma(necessidades.map((n) => n.custoTotal), 2);
+  const custoUnitario = div(custoTotalEstimado, quantidadeUnidades, 2);
   const estoqueSuficiente = necessidades.every((n) => n.falta <= 0);
 
   return {
     volumeTotalMl,
-    fatorEscala: Number(fatorEscala.toFixed(3)),
+    fatorEscala: arred(fatorEscala, 3),
     necessidades,
     custoTotalEstimado,
     custoUnitario,
@@ -341,7 +327,7 @@ export function enriquecerOrdens(
           op.status === "CONCLUIDA" ? op.custoTotalEstimado : calc.custoTotalEstimado,
         custoUnitario:
           op.status === "CONCLUIDA"
-            ? Number((op.custoTotalEstimado / op.quantidadeUnidades).toFixed(2))
+            ? div(op.custoTotalEstimado, op.quantidadeUnidades, 2)
             : calc.custoUnitario,
         necessidades: calc.necessidades,
         estoqueSuficiente: ordemAtiva(op.status) ? calc.estoqueSuficiente : true,
@@ -370,9 +356,7 @@ export function montarDashboardResumo(params: {
     .filter((i) => i.abaixoMinimo)
     .sort((a, b) => a.saldoAtual - b.saldoAtual);
 
-  const valorTotalEstoque = Number(
-    insumosDet.reduce((acc, i) => acc + i.valorEmEstoque, 0).toFixed(2),
-  );
+  const valorTotalEstoque = soma(insumosDet.map((i) => i.valorEmEstoque), 2);
 
   const ordensPlanejadas = ordensDet.filter((o) => o.status === "PLANEJADA").length;
   const ordensEmProducao = ordensDet.filter((o) => o.status === "EM_PRODUCAO").length;
@@ -396,4 +380,68 @@ export function montarDashboardResumo(params: {
     ultimosMovimentos: movimentosDet.slice(0, 8),
     ordensRecentes: ordensDet.slice(0, 6),
   };
+}
+
+/**
+ * Custo médio ponderado (CMP) após uma compra:
+ *   (saldo × custo atual + quantidade comprada × custo da compra) ÷ (saldo + quantidade).
+ * Sem saldo positivo antes da compra, o custo passa a ser o da própria compra.
+ */
+export function calcularCustoMedioPonderado(
+  saldoAntes: number,
+  custoAtual: number,
+  quantidadeCompra: number,
+  custoCompra: number,
+): number {
+  if (!(saldoAntes > 0)) return arred(custoCompra, 4);
+  const valorTotal = new Big(saldoAntes).times(custoAtual).plus(new Big(quantidadeCompra).times(custoCompra));
+  return div(valorTotal, new Big(saldoAntes).plus(quantidadeCompra), 4);
+}
+
+export interface ItemListaCompras {
+  insumoId: number;
+  insumoNome: string;
+  unidadeMedida: string;
+  /** Soma do que as ordens planejadas/em produção vão consumir. */
+  necessario: number;
+  saldoAtual: number;
+  /** Quanto falta comprar (necessário − saldo, nunca negativo). */
+  comprar: number;
+  custoUnitario: number;
+  custoEstimado: number;
+}
+
+/**
+ * Lista de compras consolidada de todas as ordens ainda não concluídas.
+ * Diferente da falta de cada ordem isolada, aqui o estoque é dividido entre
+ * as ordens: duas ordens que usam o mesmo insumo somam o consumo.
+ */
+export function montarListaDeCompras(ordens: OrdemProducaoComDetalhes[]): ItemListaCompras[] {
+  const porInsumo = new Map<number, { item: NecessidadeInsumo; total: Big }>();
+  for (const ordem of ordens) {
+    if (!ordemAtiva(ordem.status)) continue;
+    for (const nec of ordem.necessidades) {
+      const atual = porInsumo.get(nec.insumoId);
+      if (atual) atual.total = atual.total.plus(nec.quantidadeNecessaria);
+      else porInsumo.set(nec.insumoId, { item: nec, total: new Big(nec.quantidadeNecessaria) });
+    }
+  }
+
+  return [...porInsumo.values()]
+    .map(({ item, total }) => {
+      const necessario = arred(total, 3);
+      const comprar = Math.max(0, sub(necessario, item.saldoDisponivel, 3));
+      return {
+        insumoId: item.insumoId,
+        insumoNome: item.insumoNome,
+        unidadeMedida: item.unidadeMedida,
+        necessario,
+        saldoAtual: item.saldoDisponivel,
+        comprar,
+        custoUnitario: item.custoUnitario,
+        custoEstimado: mul(comprar, item.custoUnitario, 2),
+      };
+    })
+    .filter((i) => i.comprar > 0)
+    .sort((a, b) => a.insumoNome.localeCompare(b.insumoNome, "pt-BR"));
 }

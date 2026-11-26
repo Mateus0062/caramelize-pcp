@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import {
   Boxes,
   ChefHat,
@@ -109,9 +110,12 @@ export function AppShell({
       {/* Mobile Header */}
       <header className="lg:hidden sticky top-0 z-30 flex items-center justify-between px-4 py-3 bg-creme-claro/95 backdrop-blur border-b border-caramelo-200/70">
         <div className="flex items-center gap-3">
-          <img
+          <Image
             src="/marca-pudim.png"
             alt="Caramelize"
+            width={36}
+            height={36}
+            priority
             className="h-9 w-9 rounded-xl object-contain bg-caramelo-50 p-1 border border-caramelo-200"
           />
           <div>
@@ -129,7 +133,7 @@ export function AppShell({
           className="p-2 rounded-xl border border-caramelo-200 bg-creme text-cacau hover:bg-caramelo-100 transition"
           aria-label="Abrir menu"
         >
-          {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+          {mobileOpen ? <X className="h-5 w-5" aria-hidden="true" /> : <Menu className="h-5 w-5" />}
         </button>
       </header>
 
@@ -140,9 +144,12 @@ export function AppShell({
             <div>
               <div className="flex items-center justify-between pb-5 border-b border-caramelo-200/70">
                 <div className="flex items-center gap-3">
-                  <img
+                  <Image
                     src="/marca-pudim.png"
                     alt="Caramelize"
+                    width={40}
+                    height={40}
+                    priority
                     className="h-10 w-10 rounded-xl object-contain bg-caramelo-50 p-1 border border-caramelo-200"
                   />
                   <div>
@@ -159,7 +166,7 @@ export function AppShell({
                   onClick={() => setMobileOpen(false)}
                   className="p-1.5 rounded-lg text-cacau-suave hover:bg-caramelo-100"
                 >
-                  <X className="h-5 w-5" />
+                  <X className="h-5 w-5" aria-hidden="true" />
                 </button>
               </div>
               <nav className="mt-5 space-y-1.5">
@@ -170,6 +177,7 @@ export function AppShell({
                     <button
                       key={item.id}
                       type="button"
+                      aria-current={active ? "page" : undefined}
                       onClick={() => handleSelect(item.id)}
                       className={`w-full flex items-center justify-between px-3.5 py-3 rounded-2xl text-left transition ${
                         active
@@ -231,9 +239,12 @@ export function AppShell({
       <aside className="hidden lg:flex lg:flex-col lg:w-72 lg:shrink-0 bg-creme-claro border-r border-caramelo-200/70 p-6 justify-between sticky top-0 h-screen">
         <div>
           <div className="flex items-center gap-3.5 pb-6 border-b border-caramelo-200/70">
-            <img
+            <Image
               src="/marca-pudim.png"
               alt="Caramelize"
+              width={48}
+              height={48}
+              priority
               className="h-12 w-12 rounded-2xl object-contain bg-caramelo-50 p-1.5 border border-caramelo-200 shadow-xs"
             />
             <div>
@@ -254,6 +265,7 @@ export function AppShell({
                 <button
                   key={item.id}
                   type="button"
+                  aria-current={active ? "page" : undefined}
                   onClick={() => handleSelect(item.id)}
                   className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl text-left transition cursor-pointer ${
                     active
@@ -337,6 +349,7 @@ function UserFooter({
         onClick={onLogout}
         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-caramelo-200 bg-creme-claro text-xs font-semibold text-cacau hover:bg-red-50 hover:text-red-700 hover:border-red-200 transition cursor-pointer shrink-0"
         title="Sair do sistema"
+        aria-label="Sair do sistema"
       >
         <LogOut className="h-3.5 w-3.5" />
         Sair

@@ -1,0 +1,36 @@
+-- ============================================================================
+-- Caramelize PCP — Usuário próprio da aplicação, com o mínimo de acesso
+-- (RECOMENDADO para produção; execute manualmente no SQL Editor do Supabase)
+--
+-- Por padrão a aplicação conecta como "postgres", que pode apagar tabelas,
+-- criar funções etc. O papel abaixo só lê e grava dados nas tabelas do sistema.
+--
+-- Pré-requisito: `npm run db:migrate` já executado (com o usuário postgres).
+--
+-- 1. Troque a senha abaixo por uma senha forte, descomente e execute.
+-- 2. Atualize DATABASE_URL no servidor da aplicação:
+--    conexão direta: postgresql://caramelize_app:SENHA@db.<ref>.supabase.co:5432/postgres
+--    pooler:         postgresql://caramelize_app.<ref>:SENHA@<host-do-pooler>:6543/postgres
+-- 3. Continue usando o usuário postgres para `npm run db:migrate`.
+-- ============================================================================
+
+-- CREATE ROLE caramelize_app WITH LOGIN PASSWORD 'TROQUE-POR-UMA-SENHA-FORTE';
+--
+-- GRANT USAGE ON SCHEMA public TO caramelize_app;
+-- GRANT SELECT, INSERT, UPDATE, DELETE
+--   ON categoria, insumo, movimento_estoque, receita, forma, receita_item, ordem_producao, usuario
+--   TO caramelize_app;
+-- GRANT SELECT ON schema_migrations TO caramelize_app;
+-- GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO caramelize_app;
+--
+-- -- Como esse papel não é dono das tabelas, o RLS (migration 0004) se aplica a
+-- -- ele: estas políticas liberam o acesso somente para caramelize_app.
+-- CREATE POLICY caramelize_app_all ON categoria         TO caramelize_app USING (true) WITH CHECK (true);
+-- CREATE POLICY caramelize_app_all ON insumo            TO caramelize_app USING (true) WITH CHECK (true);
+-- CREATE POLICY caramelize_app_all ON movimento_estoque TO caramelize_app USING (true) WITH CHECK (true);
+-- CREATE POLICY caramelize_app_all ON receita           TO caramelize_app USING (true) WITH CHECK (true);
+-- CREATE POLICY caramelize_app_all ON forma             TO caramelize_app USING (true) WITH CHECK (true);
+-- CREATE POLICY caramelize_app_all ON receita_item      TO caramelize_app USING (true) WITH CHECK (true);
+-- CREATE POLICY caramelize_app_all ON ordem_producao    TO caramelize_app USING (true) WITH CHECK (true);
+-- CREATE POLICY caramelize_app_all ON usuario           TO caramelize_app USING (true) WITH CHECK (true);
+-- CREATE POLICY caramelize_app_leitura ON schema_migrations FOR SELECT TO caramelize_app USING (true);

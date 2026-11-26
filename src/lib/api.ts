@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import type { z } from "zod";
 import { clearSessionCookie, getCurrentSession, type SessionUser } from "./auth";
 import { DomainError, HttpError } from "./errors";
-import { logDatabaseHint } from "./pg";
+import { erroOriginal, logDatabaseHint } from "./pg";
 
 const MAX_BODY_BYTES = 100 * 1024; // 100 KB
 
@@ -33,7 +33,7 @@ export function errorResponse(err: unknown): NextResponse {
 
   // Rede de segurança: violações de integridade do Postgres viram 400 com
   // mensagem genérica (o detalhe técnico fica só no log do servidor).
-  const pgCode = (err as { code?: unknown } | null)?.code;
+  const pgCode = (erroOriginal(err) as { code?: unknown } | null)?.code;
   const pgMessage = typeof pgCode === "string" ? PG_ERROR_MESSAGES[pgCode] : undefined;
   if (pgMessage) {
     console.warn("[api] Violação de integridade no banco:", err);

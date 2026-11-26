@@ -1,11 +1,11 @@
-import fs from "node:fs";
-import path from "node:path";
+import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
+import { getDb, type Db, type Tx } from "../db/client";
+import * as t from "../db/schema";
 import { DomainError } from "./errors";
 import { formatQty, hojeISO } from "./format";
-import { assertLocalModeAllowed, writeJsonAtomic } from "./local-store";
 import {
+  calcularCustoMedioPonderado,
   calcularNecessidadesOrdem,
-  calcularSaldosMap,
   enriquecerFormas,
   enriquecerInsumos,
   enriquecerMovimentos,
@@ -15,8 +15,7 @@ import {
   validarTransicaoStatus,
   type SaldosMap,
 } from "./pcp-engine";
-import { getPool, hasDatabaseUrl, withTransaction } from "./pg";
-import { createSeedData, type LocalDbSchema } from "./seed";
+import { hasDatabaseUrl } from "./pg";
 import type {
   Categoria,
   DashboardResumo,
@@ -35,18 +34,29 @@ import type {
   TipoMovimento,
 } from "./types";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const DATA_FILE = path.join(DATA_DIR, "caramelize-db.json");
+/**
+ * Regras de negócio e acesso a dados do PCP (Drizzle ORM).
+ * O mesmo código atende o Supabase e o banco local (PGlite) — ver db/client.ts.
+ */
+
+/** Quantos movimentos recentes a tela carrega de início (o resto vem paginado). */
+export const MOVIMENTOS_POR_PAGINA = 200;
 
 const MSG_ORDEM_ALTERADA =
   "Esta ordem foi alterada por outra ação ao mesmo tempo. Atualize a página e tente novamente.";
+const MSG_CATEGORIA_EM_USO =
+  "Esta categoria possui insumos (inclusive arquivados) e não pode ser excluída.";
+
+export function getStorageMode(): "supabase" | "local" {
+  return hasDatabaseUrl() ? "supabase" : "local";
+}
 
 /**
  * Data prevista é uma data de calendário ("AAAA-MM-DD"). Gravamos ao
  * meio-dia UTC daquele dia: assim nenhum fuso horário a empurra para o dia
  * anterior ou seguinte. Sem data informada, usa hoje no fuso da operação.
  */
-function normalizarDataPrevista(valor?: string): string {
+function normalizarDataPrevista(valor?: string): Date {
   const dia = valor?.trim() || hojeISO();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dia)) {
     throw new DomainError("Data prevista inválida. Use o formato AAAA-MM-DD.");
@@ -55,41 +65,96 @@ function normalizarDataPrevista(valor?: string): string {
   if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== dia) {
     throw new DomainError("Data prevista inválida.");
   }
-  return date.toISOString();
+  return date;
 }
 
-export function getStorageMode(): "supabase" | "local" {
-  return hasDatabaseUrl() ? "supabase" : "local";
+// ============================================================================
+// CONVERSÃO LINHA → MODELO
+// ============================================================================
+const iso = (d: Date | null | undefined): string => (d ?? new Date(0)).toISOString();
+
+function mapCategoria(r: typeof t.categoria.$inferSelect): Categoria {
+  return { id: r.id, nome: r.nome, dataAtualizacao: iso(r.dataAtualizacao) };
 }
 
-/*
- * Modo local: cada operação lê o arquivo, altera e grava de volta sem nenhum
- * `await` no meio — o Node executa esse trecho inteiro antes de atender outra
- * requisição, então duas operações não se sobrepõem dentro do mesmo processo.
- */
-function readLocalDb(): LocalDbSchema {
-  assertLocalModeAllowed();
-  if (!fs.existsSync(DATA_FILE)) {
-    const seed = createSeedData();
-    writeJsonAtomic(DATA_FILE, seed);
-    return seed;
-  }
-  const raw = fs.readFileSync(DATA_FILE, "utf-8");
-  return JSON.parse(raw) as LocalDbSchema;
+function mapInsumo(r: typeof t.insumo.$inferSelect): Insumo {
+  return {
+    id: r.id,
+    nome: r.nome,
+    unidadeMedida: r.unidadeMedida,
+    estoqueMinimo: r.estoqueMinimo,
+    custoUnitario: r.custoUnitario,
+    dataAtualizacao: iso(r.dataAtualizacao),
+    categoriaId: r.categoriaId,
+    ativo: r.ativo,
+  };
 }
 
-function writeLocalDb(db: LocalDbSchema): void {
-  assertLocalModeAllowed();
-  writeJsonAtomic(DATA_FILE, db);
+function mapMovimento(r: typeof t.movimentoEstoque.$inferSelect): MovimentoEstoque {
+  return {
+    id: r.id,
+    quantidade: r.quantidade,
+    tipo: r.tipo,
+    custoUnitario: r.custoUnitario ?? null,
+    dataMovimento: iso(r.dataMovimento),
+    dataRegistro: iso(r.dataRegistro),
+    observacao: r.observacao ?? null,
+    insumoId: r.insumoId,
+  };
+}
+
+function mapForma(r: typeof t.forma.$inferSelect): Forma {
+  return { id: r.id, nome: r.nome ?? "", volumeMl: r.volumeMl, insumoId: r.insumoId };
+}
+
+function mapReceita(r: typeof t.receita.$inferSelect): Receita {
+  return {
+    id: r.id,
+    nome: r.nome,
+    descricao: r.descricao ?? null,
+    rendimentoMl: r.rendimentoMl,
+    margemLucro: r.margemLucro,
+    dataAtualizacao: iso(r.dataAtualizacao),
+  };
+}
+
+function mapReceitaItem(r: typeof t.receitaItem.$inferSelect): ReceitaItem {
+  return { id: r.id, receitaId: r.receitaId, insumoId: r.insumoId, quantidade: r.quantidade };
+}
+
+function mapOrdem(r: typeof t.ordemProducao.$inferSelect): OrdemProducao {
+  return {
+    id: r.id,
+    receitaId: r.receitaId,
+    formaId: r.formaId,
+    quantidadeUnidades: r.quantidadeUnidades,
+    status: r.status,
+    custoTotalEstimado: r.custoTotalEstimado,
+    precoVendaUnitario: r.precoVendaUnitario ?? null,
+    observacao: r.observacao ?? null,
+    dataPrevista: iso(r.dataPrevista),
+    dataCriacao: iso(r.dataCriacao),
+    dataConclusao: r.dataConclusao ? r.dataConclusao.toISOString() : null,
+  };
+}
+
+// ============================================================================
+// SALDOS (somados pelo banco)
+// ============================================================================
+const deltaSaldo = sql`CASE WHEN ${t.movimentoEstoque.tipo} IN ('COMPRA', 'AJUSTE_ENTRADA')
+  THEN ${t.movimentoEstoque.quantidade} ELSE -${t.movimentoEstoque.quantidade} END`;
+
+async function saldoDoInsumo(executor: Db | Tx, insumoId: number): Promise<number> {
+  const [r] = await executor
+    .select({ saldo: sql<string | null>`SUM(${deltaSaldo})` })
+    .from(t.movimentoEstoque)
+    .where(eq(t.movimentoEstoque.insumoId, insumoId));
+  return Number(r?.saldo ?? 0);
 }
 
 // ============================================================================
 // LEITURA (snapshot)
 // ============================================================================
-
-/** Quantos movimentos recentes a tela carrega de início (o resto vem paginado). */
-export const MOVIMENTOS_POR_PAGINA = 200;
-
 interface Snapshot {
   categorias: Categoria[];
   insumos: Insumo[];
@@ -97,155 +162,58 @@ interface Snapshot {
   receitas: Receita[];
   receitaItens: ReceitaItem[];
   ordensProducao: OrdemProducao[];
-  /** Saldo por insumo, somado pelo banco (não é preciso trazer os movimentos). */
   saldos: SaldosMap;
-  /** Somente os N movimentos mais recentes (N = limiteMovimentos). */
   movimentosRecentes: MovimentoEstoque[];
   totalMovimentos: number;
 }
 
-const MOVIMENTO_COLUMNS =
-  "id, quantidade, tipo, custo_unitario, data_movimento, data_registro, observacao, insumo_id";
-
-function mapMovimentoRow(r: Record<string, unknown>): MovimentoEstoque {
-  return {
-    id: Number(r.id),
-    quantidade: Number(r.quantidade),
-    tipo: r.tipo as TipoMovimento,
-    custoUnitario: r.custo_unitario != null ? Number(r.custo_unitario) : null,
-    dataMovimento: new Date(r.data_movimento as string).toISOString(),
-    dataRegistro: new Date(r.data_registro as string).toISOString(),
-    observacao: (r.observacao as string | null) ?? null,
-    insumoId: Number(r.insumo_id),
-  };
-}
-
-function mapInsumoRow(r: Record<string, unknown>): Insumo {
-  return {
-    id: Number(r.id),
-    nome: r.nome as string,
-    unidadeMedida: r.unidade_medida as string,
-    estoqueMinimo: Number(r.estoque_minimo ?? 0),
-    custoUnitario: Number(r.custo_unitario ?? 0),
-    dataAtualizacao: new Date(r.data_atualizacao as string).toISOString(),
-    categoriaId: Number(r.categoria_id),
-    ativo: Boolean(r.ativo),
-  };
-}
-
-const INSUMO_COLUMNS =
-  "id, nome, unidade_medida, estoque_minimo, custo_unitario, data_atualizacao, categoria_id, ativo";
-
-function ordenarMovimentosRecentes(movimentos: MovimentoEstoque[]): MovimentoEstoque[] {
-  return [...movimentos].sort(
-    (a, b) =>
-      new Date(b.dataMovimento).getTime() - new Date(a.dataMovimento).getTime() || b.id - a.id,
-  );
-}
-
 /**
  * Carrega cadastros, saldos e (opcionalmente) os movimentos mais recentes.
- * No Postgres são 7 a 8 consultas em paralelo, e o histórico de movimentos
- * NÃO é transferido inteiro: o banco devolve só o saldo de cada insumo.
+ * O histórico de movimentos NÃO é transferido inteiro: o banco devolve só o
+ * saldo e a contagem de cada insumo.
  */
 async function loadSnapshot(limiteMovimentos = 0): Promise<Snapshot> {
-  if (!hasDatabaseUrl()) {
-    const local = readLocalDb();
-    return {
-      categorias: local.categorias,
-      insumos: local.insumos,
-      formas: local.formas,
-      receitas: local.receitas,
-      receitaItens: local.receitaItens,
-      ordensProducao: local.ordensProducao,
-      saldos: calcularSaldosMap(local.movimentos),
-      movimentosRecentes:
-        limiteMovimentos > 0
-          ? ordenarMovimentosRecentes(local.movimentos).slice(0, limiteMovimentos)
-          : [],
-      totalMovimentos: local.movimentos.length,
-    };
-  }
-
-  const pool = getPool();
-  const [catRes, insRes, formRes, recRes, itemRes, opRes, saldoRes, movRes] = await Promise.all([
-    pool.query("SELECT id, nome, data_atualizacao FROM categoria ORDER BY nome"),
-    pool.query(`SELECT ${INSUMO_COLUMNS} FROM insumo`),
-    pool.query("SELECT id, nome, volume_ml, insumo_id FROM forma"),
-    pool.query(
-      "SELECT id, nome, descricao, rendimento_ml, margem_lucro, data_atualizacao FROM receita",
-    ),
-    pool.query("SELECT id, receita_id, insumo_id, quantidade FROM receita_item"),
-    pool.query(
-      "SELECT id, receita_id, forma_id, quantidade_unidades, status, custo_total_estimado, preco_venda_unitario, observacao, data_prevista, data_criacao, data_conclusao FROM ordem_producao",
-    ),
-    pool.query(
-      `SELECT insumo_id,
-              SUM(CASE WHEN tipo IN ('COMPRA', 'AJUSTE_ENTRADA') THEN quantidade ELSE -quantidade END) AS saldo,
-              COUNT(*)::int AS qtd
-       FROM movimento_estoque
-       GROUP BY insumo_id`,
-    ),
+  const db = await getDb();
+  const [cats, ins, fms, recs, itens, ops, saldoRows, movs] = await Promise.all([
+    db.select().from(t.categoria).orderBy(t.categoria.nome),
+    db.select().from(t.insumo),
+    db.select().from(t.forma),
+    db.select().from(t.receita),
+    db.select().from(t.receitaItem),
+    db.select().from(t.ordemProducao),
+    db
+      .select({
+        insumoId: t.movimentoEstoque.insumoId,
+        saldo: sql<string>`SUM(${deltaSaldo})`,
+        qtd: sql<number>`COUNT(*)::int`,
+      })
+      .from(t.movimentoEstoque)
+      .groupBy(t.movimentoEstoque.insumoId),
     limiteMovimentos > 0
-      ? pool.query(
-          `SELECT ${MOVIMENTO_COLUMNS} FROM movimento_estoque
-           ORDER BY data_movimento DESC, id DESC
-           LIMIT $1`,
-          [limiteMovimentos],
-        )
-      : Promise.resolve({ rows: [] as Record<string, unknown>[] }),
+      ? db
+          .select()
+          .from(t.movimentoEstoque)
+          .orderBy(desc(t.movimentoEstoque.dataMovimento), desc(t.movimentoEstoque.id))
+          .limit(limiteMovimentos)
+      : Promise.resolve([] as (typeof t.movimentoEstoque.$inferSelect)[]),
   ]);
 
   const saldos: SaldosMap = new Map();
   let totalMovimentos = 0;
-  for (const r of saldoRes.rows) {
-    saldos.set(Number(r.insumo_id), Number(r.saldo));
+  for (const r of saldoRows) {
+    saldos.set(r.insumoId, Number(r.saldo));
     totalMovimentos += Number(r.qtd);
   }
 
   return {
-    categorias: catRes.rows.map((r) => ({
-      id: Number(r.id),
-      nome: r.nome,
-      dataAtualizacao: new Date(r.data_atualizacao).toISOString(),
-    })),
-    insumos: insRes.rows.map(mapInsumoRow),
-    formas: formRes.rows.map((r) => ({
-      id: Number(r.id),
-      nome: r.nome ?? "",
-      volumeMl: Number(r.volume_ml),
-      insumoId: Number(r.insumo_id),
-    })),
-    receitas: recRes.rows.map((r) => ({
-      id: Number(r.id),
-      nome: r.nome,
-      descricao: r.descricao ?? null,
-      rendimentoMl: Number(r.rendimento_ml),
-      margemLucro: Number(r.margem_lucro ?? 65),
-      dataAtualizacao: new Date(r.data_atualizacao).toISOString(),
-    })),
-    receitaItens: itemRes.rows.map((r) => ({
-      id: Number(r.id),
-      receitaId: Number(r.receita_id),
-      insumoId: Number(r.insumo_id),
-      quantidade: Number(r.quantidade),
-    })),
-    ordensProducao: opRes.rows.map((r) => ({
-      id: Number(r.id),
-      receitaId: Number(r.receita_id),
-      formaId: Number(r.forma_id),
-      quantidadeUnidades: Number(r.quantidade_unidades),
-      status: r.status as StatusOrdemProducao,
-      custoTotalEstimado: Number(r.custo_total_estimado ?? 0),
-      precoVendaUnitario:
-        r.preco_venda_unitario != null ? Number(r.preco_venda_unitario) : null,
-      observacao: r.observacao ?? null,
-      dataPrevista: new Date(r.data_prevista).toISOString(),
-      dataCriacao: new Date(r.data_criacao).toISOString(),
-      dataConclusao: r.data_conclusao ? new Date(r.data_conclusao).toISOString() : null,
-    })),
+    categorias: cats.map(mapCategoria),
+    insumos: ins.map(mapInsumo),
+    formas: fms.map(mapForma),
+    receitas: recs.map(mapReceita),
+    receitaItens: itens.map(mapReceitaItem),
+    ordensProducao: ops.map(mapOrdem),
     saldos,
-    movimentosRecentes: movRes.rows.map(mapMovimentoRow),
+    movimentosRecentes: movs.map(mapMovimento),
     totalMovimentos,
   };
 }
@@ -253,13 +221,7 @@ async function loadSnapshot(limiteMovimentos = 0): Promise<Snapshot> {
 /** Calcula formas, receitas e ordens detalhadas uma única vez por snapshot. */
 function detalhar(s: Snapshot) {
   const formasDet = enriquecerFormas(s.formas, s.insumos, s.saldos);
-  const receitasDet = enriquecerReceitas(
-    s.receitas,
-    s.receitaItens,
-    s.insumos,
-    formasDet,
-    s.saldos,
-  );
+  const receitasDet = enriquecerReceitas(s.receitas, s.receitaItens, s.insumos, formasDet, s.saldos);
   const ordensDet = enriquecerOrdens(s.ordensProducao, receitasDet, formasDet);
   return { formasDet, receitasDet, ordensDet };
 }
@@ -269,10 +231,41 @@ function ordenarCategorias(categorias: Categoria[]): Categoria[] {
 }
 
 // ============================================================================
+// VALIDAÇÕES COMPARTILHADAS (mensagens claras em vez de erros de chave estrangeira)
+// ============================================================================
+async function assertCategoriaExiste(executor: Db | Tx, categoriaId: number): Promise<void> {
+  const r = await executor
+    .select({ id: t.categoria.id })
+    .from(t.categoria)
+    .where(eq(t.categoria.id, categoriaId))
+    .limit(1);
+  if (!r.length) throw new DomainError("Categoria não encontrada.");
+}
+
+function assertSaldoSuficiente(nome: string, unidade: string, saldo: number, quantidade: number): void {
+  if (quantidade > saldo + 1e-9) {
+    throw new DomainError(
+      `Saldo insuficiente de ${nome}: disponível ${formatQty(saldo, unidade)}. ` +
+        "Registre a compra ou um ajuste de entrada antes da saída.",
+    );
+  }
+}
+
+async function assertInsumosAtivos(executor: Db | Tx, insumoIds: number[]): Promise<void> {
+  const ids = [...new Set(insumoIds)];
+  const r = await executor
+    .select({ id: t.insumo.id })
+    .from(t.insumo)
+    .where(and(inArray(t.insumo.id, ids), eq(t.insumo.ativo, true)));
+  if (r.length !== ids.length) {
+    throw new DomainError("A receita usa um insumo que não existe ou foi arquivado.");
+  }
+}
+
+// ============================================================================
 // DASHBOARD E CARGA COMPLETA DA TELA
 // ============================================================================
 function montarDashboard(
-  s: Snapshot,
   insumosDet: InsumoComDetalhes[],
   movimentosDet: MovimentoComDetalhes[],
   det: ReturnType<typeof detalhar>,
@@ -291,7 +284,7 @@ export async function getDashboard(): Promise<DashboardResumo> {
   const s = await loadSnapshot(8);
   const insumosDet = enriquecerInsumos(s.insumos, s.categorias, s.saldos);
   const movimentosDet = enriquecerMovimentos(s.movimentosRecentes, s.insumos);
-  return montarDashboard(s, insumosDet, movimentosDet, detalhar(s));
+  return montarDashboard(insumosDet, movimentosDet, detalhar(s));
 }
 
 export interface PainelCompleto {
@@ -305,17 +298,14 @@ export interface PainelCompleto {
   ordens: OrdemProducaoComDetalhes[];
 }
 
-/**
- * Tudo o que a tela principal precisa, numa única leitura do banco.
- * Substitui as 7 chamadas separadas (cada uma relia o banco inteiro).
- */
+/** Tudo o que a tela principal precisa, numa única leitura do banco. */
 export async function getPainelCompleto(): Promise<PainelCompleto> {
   const s = await loadSnapshot(MOVIMENTOS_POR_PAGINA);
   const insumosDet = enriquecerInsumos(s.insumos, s.categorias, s.saldos);
   const movimentosDet = enriquecerMovimentos(s.movimentosRecentes, s.insumos);
   const det = detalhar(s);
   return {
-    dashboard: montarDashboard(s, insumosDet, movimentosDet, det),
+    dashboard: montarDashboard(insumosDet, movimentosDet, det),
     categorias: ordenarCategorias(s.categorias),
     insumos: insumosDet,
     movimentos: movimentosDet,
@@ -327,107 +317,30 @@ export async function getPainelCompleto(): Promise<PainelCompleto> {
 }
 
 // ============================================================================
-// VALIDAÇÕES COMPARTILHADAS (mensagens claras em vez de erros de chave estrangeira)
-// ============================================================================
-async function assertCategoriaExiste(categoriaId: number): Promise<void> {
-  const res = await getPool().query("SELECT 1 FROM categoria WHERE id = $1", [categoriaId]);
-  if (!res.rowCount) throw new DomainError("Categoria não encontrada.");
-}
-
-function assertSaldoSuficiente(
-  nome: string,
-  unidade: string,
-  saldo: number,
-  quantidade: number,
-): void {
-  if (quantidade > saldo + 1e-9) {
-    throw new DomainError(
-      `Saldo insuficiente de ${nome}: disponível ${formatQty(saldo, unidade)}. ` +
-        "Registre a compra ou um ajuste de entrada antes da saída.",
-    );
-  }
-}
-
-async function assertInsumosAtivos(insumoIds: number[]): Promise<void> {
-  const ids = [...new Set(insumoIds)];
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const ativos = new Set(db.insumos.filter((i) => i.ativo).map((i) => i.id));
-    if (ids.some((id) => !ativos.has(id))) {
-      throw new DomainError("A receita usa um insumo que não existe ou foi arquivado.");
-    }
-    return;
-  }
-  const res = await getPool().query(
-    "SELECT id FROM insumo WHERE id = ANY($1::int[]) AND ativo = true",
-    [ids],
-  );
-  if ((res.rowCount ?? 0) !== ids.length) {
-    throw new DomainError("A receita usa um insumo que não existe ou foi arquivado.");
-  }
-}
-
-// ============================================================================
 // CATEGORIAS
 // ============================================================================
 export async function listCategorias(): Promise<Categoria[]> {
-  return ordenarCategorias((await loadSnapshot()).categorias);
+  const db = await getDb();
+  return ordenarCategorias((await db.select().from(t.categoria)).map(mapCategoria));
 }
 
 export async function createCategoria(nome: string): Promise<Categoria> {
-  const now = new Date().toISOString();
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const cat: Categoria = {
-      id: db.nextIds.categoria++,
-      nome: nome.trim(),
-      dataAtualizacao: now,
-    };
-    db.categorias.push(cat);
-    writeLocalDb(db);
-    return cat;
-  }
-
-  const res = await getPool().query(
-    "INSERT INTO categoria (nome, data_atualizacao) VALUES ($1, NOW()) RETURNING id, nome, data_atualizacao",
-    [nome.trim()],
-  );
-  const row = res.rows[0];
-  return {
-    id: Number(row.id),
-    nome: row.nome,
-    dataAtualizacao: new Date(row.data_atualizacao).toISOString(),
-  };
+  const db = await getDb();
+  const [r] = await db.insert(t.categoria).values({ nome: nome.trim() }).returning();
+  return mapCategoria(r);
 }
 
-const MSG_CATEGORIA_EM_USO =
-  "Esta categoria possui insumos (inclusive arquivados) e não pode ser excluída.";
-
 export async function deleteCategoria(id: number): Promise<void> {
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    if (!db.categorias.some((c) => c.id === id)) {
-      throw new DomainError("Categoria não encontrada.");
-    }
-    // Insumos arquivados também apontam para a categoria: apagá-la deixaria
-    // registros órfãos (no Postgres, a chave estrangeira impediria).
-    if (db.insumos.some((i) => i.categoriaId === id)) {
-      throw new DomainError(MSG_CATEGORIA_EM_USO);
-    }
-    db.categorias = db.categorias.filter((c) => c.id !== id);
-    writeLocalDb(db);
-    return;
-  }
-
-  const check = await getPool().query(
-    "SELECT 1 FROM insumo WHERE categoria_id = $1 LIMIT 1",
-    [id],
-  );
-  if (check.rowCount && check.rowCount > 0) {
-    throw new DomainError(MSG_CATEGORIA_EM_USO);
-  }
-  const res = await getPool().query("DELETE FROM categoria WHERE id = $1", [id]);
-  if (!res.rowCount) throw new DomainError("Categoria não encontrada.");
+  const db = await getDb();
+  // Insumos arquivados também apontam para a categoria.
+  const emUso = await db
+    .select({ id: t.insumo.id })
+    .from(t.insumo)
+    .where(eq(t.insumo.categoriaId, id))
+    .limit(1);
+  if (emUso.length) throw new DomainError(MSG_CATEGORIA_EM_USO);
+  const res = await db.delete(t.categoria).where(eq(t.categoria.id, id)).returning({ id: t.categoria.id });
+  if (!res.length) throw new DomainError("Categoria não encontrada.");
 }
 
 // ============================================================================
@@ -446,79 +359,34 @@ export async function createInsumo(input: {
   categoriaId: number;
   estoqueInicial?: number;
 }): Promise<Insumo> {
-  const now = new Date().toISOString();
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    if (!db.categorias.some((c) => c.id === input.categoriaId)) {
-      throw new DomainError("Categoria não encontrada.");
-    }
-    const insumo: Insumo = {
-      id: db.nextIds.insumo++,
-      nome: input.nome.trim(),
-      unidadeMedida: input.unidadeMedida.trim(),
-      estoqueMinimo: input.estoqueMinimo,
-      custoUnitario: input.custoUnitario,
-      categoriaId: input.categoriaId,
-      dataAtualizacao: now,
-      ativo: true,
-    };
-    db.insumos.push(insumo);
+  const db = await getDb();
+  await assertCategoriaExiste(db, input.categoriaId);
 
+  // Insumo + estoque inicial na mesma transação: ou grava os dois, ou nenhum.
+  const row = await db.transaction(async (tx) => {
+    const [ins] = await tx
+      .insert(t.insumo)
+      .values({
+        nome: input.nome.trim(),
+        unidadeMedida: input.unidadeMedida.trim(),
+        estoqueMinimo: input.estoqueMinimo,
+        custoUnitario: input.custoUnitario,
+        categoriaId: input.categoriaId,
+        ativo: true,
+      })
+      .returning();
     if (input.estoqueInicial && input.estoqueInicial > 0) {
-      db.movimentos.push({
-        id: db.nextIds.movimento++,
-        insumoId: insumo.id,
+      await tx.insert(t.movimentoEstoque).values({
         quantidade: input.estoqueInicial,
         tipo: "COMPRA",
         custoUnitario: input.custoUnitario,
-        dataMovimento: now,
-        dataRegistro: now,
         observacao: "Estoque inicial no cadastro",
+        insumoId: ins.id,
       });
     }
-
-    writeLocalDb(db);
-    return insumo;
-  }
-
-  await assertCategoriaExiste(input.categoriaId);
-
-  // Insumo + estoque inicial na mesma transação: ou grava os dois, ou nenhum.
-  const row = await withTransaction(async (client) => {
-    const res = await client.query(
-      `INSERT INTO insumo (nome, unidade_medida, estoque_minimo, custo_unitario, categoria_id, ativo, data_atualizacao)
-       VALUES ($1, $2, $3, $4, $5, true, NOW())
-       RETURNING id, nome, unidade_medida, estoque_minimo, custo_unitario, data_atualizacao, categoria_id, ativo`,
-      [
-        input.nome.trim(),
-        input.unidadeMedida.trim(),
-        input.estoqueMinimo,
-        input.custoUnitario,
-        input.categoriaId,
-      ],
-    );
-    const inserted = res.rows[0];
-    if (input.estoqueInicial && input.estoqueInicial > 0) {
-      await client.query(
-        `INSERT INTO movimento_estoque (quantidade, tipo, custo_unitario, observacao, insumo_id)
-         VALUES ($1, 'COMPRA', $2, 'Estoque inicial no cadastro', $3)`,
-        [input.estoqueInicial, input.custoUnitario, Number(inserted.id)],
-      );
-    }
-    return inserted;
+    return ins;
   });
-  const insumoId = Number(row.id);
-
-  return {
-    id: insumoId,
-    nome: row.nome,
-    unidadeMedida: row.unidade_medida,
-    estoqueMinimo: Number(row.estoque_minimo),
-    custoUnitario: Number(row.custo_unitario),
-    dataAtualizacao: new Date(row.data_atualizacao).toISOString(),
-    categoriaId: Number(row.categoria_id),
-    ativo: Boolean(row.ativo),
-  };
+  return mapInsumo(row);
 }
 
 export async function updateInsumo(
@@ -531,113 +399,59 @@ export async function updateInsumo(
     categoriaId: number;
   },
 ): Promise<Insumo> {
-  const now = new Date().toISOString();
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const idx = db.insumos.findIndex((i) => i.id === id);
-    if (idx === -1) throw new DomainError("Insumo não encontrado.");
-    if (!db.categorias.some((c) => c.id === input.categoriaId)) {
-      throw new DomainError("Categoria não encontrada.");
-    }
-    db.insumos[idx] = {
-      ...db.insumos[idx],
+  const db = await getDb();
+  await assertCategoriaExiste(db, input.categoriaId);
+  const [r] = await db
+    .update(t.insumo)
+    .set({
       nome: input.nome.trim(),
       unidadeMedida: input.unidadeMedida.trim(),
       estoqueMinimo: input.estoqueMinimo,
       custoUnitario: input.custoUnitario,
       categoriaId: input.categoriaId,
-      dataAtualizacao: now,
-    };
-    writeLocalDb(db);
-    return db.insumos[idx];
-  }
-
-  await assertCategoriaExiste(input.categoriaId);
-  const res = await getPool().query(
-    `UPDATE insumo
-     SET nome = $1, unidade_medida = $2, estoque_minimo = $3, custo_unitario = $4, categoria_id = $5, data_atualizacao = NOW()
-     WHERE id = $6
-     RETURNING id, nome, unidade_medida, estoque_minimo, custo_unitario, data_atualizacao, categoria_id, ativo`,
-    [
-      input.nome.trim(),
-      input.unidadeMedida.trim(),
-      input.estoqueMinimo,
-      input.custoUnitario,
-      input.categoriaId,
-      id,
-    ],
-  );
-  if (res.rowCount === 0) throw new DomainError("Insumo não encontrado.");
-  const row = res.rows[0];
-  return {
-    id: Number(row.id),
-    nome: row.nome,
-    unidadeMedida: row.unidade_medida,
-    estoqueMinimo: Number(row.estoque_minimo),
-    custoUnitario: Number(row.custo_unitario),
-    dataAtualizacao: new Date(row.data_atualizacao).toISOString(),
-    categoriaId: Number(row.categoria_id),
-    ativo: Boolean(row.ativo),
-  };
+      dataAtualizacao: new Date(),
+    })
+    .where(eq(t.insumo.id, id))
+    .returning();
+  if (!r) throw new DomainError("Insumo não encontrado.");
+  return mapInsumo(r);
 }
 
 export async function deleteInsumo(id: number): Promise<void> {
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const insumo = db.insumos.find((i) => i.id === id);
-    if (!insumo) throw new DomainError("Insumo não encontrado.");
+  const db = await getDb();
+  const existe = await db.select({ id: t.insumo.id }).from(t.insumo).where(eq(t.insumo.id, id)).limit(1);
+  if (!existe.length) throw new DomainError("Insumo não encontrado.");
 
-    const emReceita = db.receitaItens.some((ri) => ri.insumoId === id);
-    if (emReceita) {
-      throw new DomainError(
-        "Este insumo faz parte de uma receita. Remova-o da receita antes de excluir.",
-      );
-    }
-
-    const forma = db.formas.find((f) => f.insumoId === id);
-    if (forma) {
-      throw new DomainError(
-        `Este insumo é a embalagem da forma "${forma.nome}". Exclua a forma antes.`,
-      );
-    }
-
-    const temMovimento = db.movimentos.some((m) => m.insumoId === id);
-    if (temMovimento) {
-      insumo.ativo = false;
-    } else {
-      db.insumos = db.insumos.filter((i) => i.id !== id);
-    }
-    writeLocalDb(db);
-    return;
+  const emReceita = await db
+    .select({ id: t.receitaItem.id })
+    .from(t.receitaItem)
+    .where(eq(t.receitaItem.insumoId, id))
+    .limit(1);
+  if (emReceita.length) {
+    throw new DomainError("Este insumo faz parte de uma receita. Remova-o da receita antes de excluir.");
   }
 
-  const pool = getPool();
-  const existe = await pool.query("SELECT 1 FROM insumo WHERE id = $1", [id]);
-  if (!existe.rowCount) throw new DomainError("Insumo não encontrado.");
-
-  const recCheck = await pool.query(
-    "SELECT 1 FROM receita_item WHERE insumo_id = $1 LIMIT 1",
-    [id],
-  );
-  if (recCheck.rowCount && recCheck.rowCount > 0) {
+  const forma = await db
+    .select({ nome: t.forma.nome })
+    .from(t.forma)
+    .where(eq(t.forma.insumoId, id))
+    .limit(1);
+  if (forma.length) {
     throw new DomainError(
-      "Este insumo faz parte de uma receita. Remova-o da receita antes de excluir.",
+      `Este insumo é a embalagem da forma "${forma[0].nome ?? ""}". Exclua a forma antes.`,
     );
   }
-  const formaCheck = await pool.query("SELECT nome FROM forma WHERE insumo_id = $1 LIMIT 1", [id]);
-  if (formaCheck.rowCount) {
-    throw new DomainError(
-      `Este insumo é a embalagem da forma "${formaCheck.rows[0].nome ?? ""}". Exclua a forma antes.`,
-    );
-  }
-  const movCheck = await pool.query(
-    "SELECT 1 FROM movimento_estoque WHERE insumo_id = $1 LIMIT 1",
-    [id],
-  );
-  if (movCheck.rowCount && movCheck.rowCount > 0) {
-    await pool.query("UPDATE insumo SET ativo = false WHERE id = $1", [id]);
+
+  const temMovimento = await db
+    .select({ id: t.movimentoEstoque.id })
+    .from(t.movimentoEstoque)
+    .where(eq(t.movimentoEstoque.insumoId, id))
+    .limit(1);
+  if (temMovimento.length) {
+    // Com histórico, o insumo é arquivado em vez de apagado.
+    await db.update(t.insumo).set({ ativo: false }).where(eq(t.insumo.id, id));
   } else {
-    await pool.query("DELETE FROM insumo WHERE id = $1", [id]);
+    await db.delete(t.insumo).where(eq(t.insumo.id, id));
   }
 }
 
@@ -650,28 +464,20 @@ export async function listMovimentos(
 ): Promise<MovimentoComDetalhes[]> {
   const limite = Math.min(Math.max(opcoes.limite ?? MOVIMENTOS_POR_PAGINA, 1), 1000);
   const deslocamento = Math.max(opcoes.deslocamento ?? 0, 0);
-
-  if (!hasDatabaseUrl()) {
-    const local = readLocalDb();
-    const pagina = ordenarMovimentosRecentes(local.movimentos).slice(
-      deslocamento,
-      deslocamento + limite,
-    );
-    return enriquecerMovimentos(pagina, local.insumos);
-  }
-
-  const pool = getPool();
-  const [movRes, insRes] = await Promise.all([
-    pool.query(
-      `SELECT ${MOVIMENTO_COLUMNS} FROM movimento_estoque
-       ORDER BY data_movimento DESC, id DESC
-       LIMIT $1 OFFSET $2`,
-      [limite, deslocamento],
-    ),
-    pool.query(`SELECT ${INSUMO_COLUMNS} FROM insumo`),
+  const db = await getDb();
+  const [movs, ins] = await Promise.all([
+    db
+      .select()
+      .from(t.movimentoEstoque)
+      .orderBy(desc(t.movimentoEstoque.dataMovimento), desc(t.movimentoEstoque.id))
+      .limit(limite)
+      .offset(deslocamento),
+    db.select().from(t.insumo),
   ]);
-  return enriquecerMovimentos(movRes.rows.map(mapMovimentoRow), insRes.rows.map(mapInsumoRow));
+  return enriquecerMovimentos(movs.map(mapMovimento), ins.map(mapInsumo));
 }
+
+export type MetodoCusto = "MEDIO" | "ULTIMO";
 
 export async function createMovimento(input: {
   insumoId: number;
@@ -680,108 +486,52 @@ export async function createMovimento(input: {
   custoUnitario?: number | null;
   observacao?: string | null;
   atualizarPrecoInsumo?: boolean;
-}): Promise<MovimentoEstoque> {
-  const now = new Date().toISOString();
+  /** Como atualizar o custo do insumo numa compra: médio ponderado (padrão) ou último preço. */
+  metodoCusto?: MetodoCusto;
+}): Promise<MovimentoEstoque & { novoCustoInsumo?: number }> {
+  const db = await getDb();
   const ehSaida = input.tipo === "AJUSTE_SAIDA" || input.tipo === "PRODUCAO";
 
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const insumo = db.insumos.find((i) => i.id === input.insumoId);
-    if (!insumo || !insumo.ativo) throw new DomainError("Insumo não encontrado ou arquivado.");
+  return db.transaction(async (tx) => {
+    // FOR UPDATE: duas operações simultâneas no mesmo insumo são processadas
+    // em fila, então a checagem de saldo e o custo médio não são furados.
+    const [ins] = await tx.select().from(t.insumo).where(eq(t.insumo.id, input.insumoId)).for("update");
+    if (!ins || !ins.ativo) throw new DomainError("Insumo não encontrado ou arquivado.");
 
-    if (ehSaida) {
-      const saldo = calcularSaldosMap(db.movimentos).get(insumo.id) ?? 0;
-      assertSaldoSuficiente(insumo.nome, insumo.unidadeMedida, saldo, input.quantidade);
-    }
+    const saldoAntes = await saldoDoInsumo(tx, ins.id);
+    if (ehSaida) assertSaldoSuficiente(ins.nome, ins.unidadeMedida, saldoAntes, input.quantidade);
 
-    const mov: MovimentoEstoque = {
-      id: db.nextIds.movimento++,
-      insumoId: input.insumoId,
-      quantidade: input.quantidade,
-      tipo: input.tipo,
-      custoUnitario: input.custoUnitario ?? insumo.custoUnitario,
-      dataMovimento: now,
-      dataRegistro: now,
-      observacao: input.observacao?.trim() || null,
-    };
-    db.movimentos.push(mov);
+    const [mov] = await tx
+      .insert(t.movimentoEstoque)
+      .values({
+        quantidade: input.quantidade,
+        tipo: input.tipo,
+        // Sem custo informado, registra o custo atual do insumo.
+        custoUnitario: input.custoUnitario ?? ins.custoUnitario,
+        observacao: input.observacao?.trim() || null,
+        insumoId: ins.id,
+      })
+      .returning();
 
+    let novoCustoInsumo: number | undefined;
     if (
       input.tipo === "COMPRA" &&
       input.atualizarPrecoInsumo &&
       input.custoUnitario != null &&
       input.custoUnitario >= 0
     ) {
-      insumo.custoUnitario = input.custoUnitario;
-      insumo.dataAtualizacao = now;
+      novoCustoInsumo =
+        input.metodoCusto === "ULTIMO"
+          ? input.custoUnitario
+          : calcularCustoMedioPonderado(saldoAntes, ins.custoUnitario, input.quantidade, input.custoUnitario);
+      await tx
+        .update(t.insumo)
+        .set({ custoUnitario: novoCustoInsumo, dataAtualizacao: new Date() })
+        .where(eq(t.insumo.id, ins.id));
     }
 
-    writeLocalDb(db);
-    return mov;
-  }
-
-  const r = await withTransaction(async (client) => {
-    // FOR UPDATE: duas saídas simultâneas do mesmo insumo são processadas em
-    // fila, então a checagem de saldo não é furada por concorrência.
-    const insRes = await client.query(
-      "SELECT nome, unidade_medida, custo_unitario, ativo FROM insumo WHERE id = $1 FOR UPDATE",
-      [input.insumoId],
-    );
-    const insumo = insRes.rows[0];
-    if (!insumo || !insumo.ativo) throw new DomainError("Insumo não encontrado ou arquivado.");
-
-    if (ehSaida) {
-      const saldoRes = await client.query(
-        `SELECT COALESCE(SUM(CASE WHEN tipo IN ('COMPRA', 'AJUSTE_ENTRADA') THEN quantidade ELSE -quantidade END), 0) AS saldo
-         FROM movimento_estoque WHERE insumo_id = $1`,
-        [input.insumoId],
-      );
-      assertSaldoSuficiente(
-        insumo.nome,
-        insumo.unidade_medida,
-        Number(saldoRes.rows[0]?.saldo ?? 0),
-        input.quantidade,
-      );
-    }
-
-    const res = await client.query(
-      `INSERT INTO movimento_estoque (quantidade, tipo, custo_unitario, observacao, insumo_id)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, quantidade, tipo, custo_unitario, data_movimento, data_registro, observacao, insumo_id`,
-      [
-        input.quantidade,
-        input.tipo,
-        // Sem custo informado, registra o custo atual do insumo (igual ao modo local).
-        input.custoUnitario ?? Number(insumo.custo_unitario ?? 0),
-        input.observacao?.trim() || null,
-        input.insumoId,
-      ],
-    );
-
-    if (
-      input.tipo === "COMPRA" &&
-      input.atualizarPrecoInsumo &&
-      input.custoUnitario != null &&
-      input.custoUnitario >= 0
-    ) {
-      await client.query(
-        "UPDATE insumo SET custo_unitario = $1, data_atualizacao = NOW() WHERE id = $2",
-        [input.custoUnitario, input.insumoId],
-      );
-    }
-    return res.rows[0];
+    return { ...mapMovimento(mov), novoCustoInsumo };
   });
-
-  return {
-    id: Number(r.id),
-    quantidade: Number(r.quantidade),
-    tipo: r.tipo as TipoMovimento,
-    custoUnitario: r.custo_unitario != null ? Number(r.custo_unitario) : null,
-    dataMovimento: new Date(r.data_movimento).toISOString(),
-    dataRegistro: new Date(r.data_registro).toISOString(),
-    observacao: r.observacao ?? null,
-    insumoId: Number(r.insumo_id),
-  };
 }
 
 // ============================================================================
@@ -797,75 +547,40 @@ export async function createForma(input: {
   volumeMl: number;
   insumoId: number;
 }): Promise<Forma> {
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    if (!db.insumos.some((i) => i.id === input.insumoId && i.ativo)) {
-      throw new DomainError("Insumo da embalagem não encontrado ou arquivado.");
-    }
-    if (db.formas.some((f) => f.insumoId === input.insumoId)) {
-      throw new DomainError("Este insumo já está vinculado a uma forma.");
-    }
-    const forma: Forma = {
-      id: db.nextIds.forma++,
-      nome: input.nome.trim(),
-      volumeMl: input.volumeMl,
-      insumoId: input.insumoId,
-    };
-    db.formas.push(forma);
-    writeLocalDb(db);
-    return forma;
-  }
+  const db = await getDb();
+  const ins = await db
+    .select({ id: t.insumo.id })
+    .from(t.insumo)
+    .where(and(eq(t.insumo.id, input.insumoId), eq(t.insumo.ativo, true)))
+    .limit(1);
+  if (!ins.length) throw new DomainError("Insumo da embalagem não encontrado ou arquivado.");
 
-  const pool = getPool();
-  const insumoCheck = await pool.query("SELECT 1 FROM insumo WHERE id = $1 AND ativo = true", [
-    input.insumoId,
-  ]);
-  if (!insumoCheck.rowCount) {
-    throw new DomainError("Insumo da embalagem não encontrado ou arquivado.");
-  }
-  const res = await pool.query(
-    `INSERT INTO forma (nome, volume_ml, insumo_id)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (insumo_id) DO NOTHING
-     RETURNING id, nome, volume_ml, insumo_id`,
-    [input.nome.trim(), input.volumeMl, input.insumoId],
-  );
-  if (!res.rowCount) throw new DomainError("Este insumo já está vinculado a uma forma.");
-  const r = res.rows[0];
-  return {
-    id: Number(r.id),
-    nome: r.nome,
-    volumeMl: Number(r.volume_ml),
-    insumoId: Number(r.insumo_id),
-  };
+  const jaVinculado = await db
+    .select({ id: t.forma.id })
+    .from(t.forma)
+    .where(eq(t.forma.insumoId, input.insumoId))
+    .limit(1);
+  if (jaVinculado.length) throw new DomainError("Este insumo já está vinculado a uma forma.");
+
+  const [r] = await db
+    .insert(t.forma)
+    .values({ nome: input.nome.trim(), volumeMl: input.volumeMl, insumoId: input.insumoId })
+    .returning();
+  return mapForma(r);
 }
 
 export async function deleteForma(id: number): Promise<void> {
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    if (!db.formas.some((f) => f.id === id)) throw new DomainError("Forma não encontrada.");
-    const emUso = db.ordensProducao.some((op) => op.formaId === id);
-    if (emUso) {
-      throw new DomainError(
-        "Esta forma já possui ordens de produção vinculadas e não pode ser excluída.",
-      );
-    }
-    db.formas = db.formas.filter((f) => f.id !== id);
-    writeLocalDb(db);
-    return;
+  const db = await getDb();
+  const emUso = await db
+    .select({ id: t.ordemProducao.id })
+    .from(t.ordemProducao)
+    .where(eq(t.ordemProducao.formaId, id))
+    .limit(1);
+  if (emUso.length) {
+    throw new DomainError("Esta forma já possui ordens de produção vinculadas e não pode ser excluída.");
   }
-
-  const check = await getPool().query(
-    "SELECT 1 FROM ordem_producao WHERE forma_id = $1 LIMIT 1",
-    [id],
-  );
-  if (check.rowCount && check.rowCount > 0) {
-    throw new DomainError(
-      "Esta forma já possui ordens de produção vinculadas e não pode ser excluída.",
-    );
-  }
-  const res = await getPool().query("DELETE FROM forma WHERE id = $1", [id]);
-  if (!res.rowCount) throw new DomainError("Forma não encontrada.");
+  const res = await db.delete(t.forma).where(eq(t.forma.id, id)).returning({ id: t.forma.id });
+  if (!res.length) throw new DomainError("Forma não encontrada.");
 }
 
 // ============================================================================
@@ -875,191 +590,68 @@ export async function listReceitas(): Promise<ReceitaComDetalhes[]> {
   return detalhar(await loadSnapshot()).receitasDet;
 }
 
-export async function createReceita(input: {
+interface ReceitaInput {
   nome: string;
   descricao?: string | null;
   rendimentoMl: number;
   margemLucro: number;
   itens: Array<{ insumoId: number; quantidade: number }>;
-}): Promise<Receita> {
-  const now = new Date().toISOString();
-  await assertInsumosAtivos(input.itens.map((it) => it.insumoId));
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const receita: Receita = {
-      id: db.nextIds.receita++,
-      nome: input.nome.trim(),
-      descricao: input.descricao?.trim() || null,
-      rendimentoMl: input.rendimentoMl,
-      margemLucro: input.margemLucro,
-      dataAtualizacao: now,
-    };
-    db.receitas.push(receita);
-
-    for (const item of input.itens) {
-      db.receitaItens.push({
-        id: db.nextIds.receitaItem++,
-        receitaId: receita.id,
-        insumoId: item.insumoId,
-        quantidade: item.quantidade,
-      });
-    }
-    writeLocalDb(db);
-    return receita;
-  }
-
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
-    const recRes = await client.query(
-      `INSERT INTO receita (nome, descricao, rendimento_ml, margem_lucro, data_atualizacao)
-       VALUES ($1, $2, $3, $4, NOW())
-       RETURNING id, nome, descricao, rendimento_ml, margem_lucro, data_atualizacao`,
-      [
-        input.nome.trim(),
-        input.descricao?.trim() || null,
-        input.rendimentoMl,
-        input.margemLucro,
-      ],
-    );
-    const rec = recRes.rows[0];
-    const receitaId = Number(rec.id);
-
-    for (const item of input.itens) {
-      await client.query(
-        `INSERT INTO receita_item (receita_id, insumo_id, quantidade)
-         VALUES ($1, $2, $3)`,
-        [receitaId, item.insumoId, item.quantidade],
-      );
-    }
-    await client.query("COMMIT");
-    return {
-      id: receitaId,
-      nome: rec.nome,
-      descricao: rec.descricao ?? null,
-      rendimentoMl: Number(rec.rendimento_ml),
-      margemLucro: Number(rec.margem_lucro),
-      dataAtualizacao: new Date(rec.data_atualizacao).toISOString(),
-    };
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
 }
 
-export async function updateReceita(
-  id: number,
-  input: {
-    nome: string;
-    descricao?: string | null;
-    rendimentoMl: number;
-    margemLucro: number;
-    itens: Array<{ insumoId: number; quantidade: number }>;
-  },
-): Promise<Receita> {
-  const now = new Date().toISOString();
-  await assertInsumosAtivos(input.itens.map((it) => it.insumoId));
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const idx = db.receitas.findIndex((r) => r.id === id);
-    if (idx === -1) throw new DomainError("Receita não encontrada.");
+function valoresReceita(input: ReceitaInput) {
+  return {
+    nome: input.nome.trim(),
+    descricao: input.descricao?.trim() || null,
+    rendimentoMl: input.rendimentoMl,
+    margemLucro: input.margemLucro,
+  };
+}
 
-    db.receitas[idx] = {
-      ...db.receitas[idx],
-      nome: input.nome.trim(),
-      descricao: input.descricao?.trim() || null,
-      rendimentoMl: input.rendimentoMl,
-      margemLucro: input.margemLucro,
-      dataAtualizacao: now,
-    };
+export async function createReceita(input: ReceitaInput): Promise<Receita> {
+  const db = await getDb();
+  await assertInsumosAtivos(db, input.itens.map((it) => it.insumoId));
+  const row = await db.transaction(async (tx) => {
+    const [rec] = await tx.insert(t.receita).values(valoresReceita(input)).returning();
+    await tx
+      .insert(t.receitaItem)
+      .values(input.itens.map((it) => ({ receitaId: rec.id, insumoId: it.insumoId, quantidade: it.quantidade })));
+    return rec;
+  });
+  return mapReceita(row);
+}
 
-    db.receitaItens = db.receitaItens.filter((ri) => ri.receitaId !== id);
-    for (const item of input.itens) {
-      db.receitaItens.push({
-        id: db.nextIds.receitaItem++,
-        receitaId: id,
-        insumoId: item.insumoId,
-        quantidade: item.quantidade,
-      });
-    }
-
-    writeLocalDb(db);
-    return db.receitas[idx];
-  }
-
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
-    const recRes = await client.query(
-      `UPDATE receita
-       SET nome = $1, descricao = $2, rendimento_ml = $3, margem_lucro = $4, data_atualizacao = NOW()
-       WHERE id = $5
-       RETURNING id, nome, descricao, rendimento_ml, margem_lucro, data_atualizacao`,
-      [
-        input.nome.trim(),
-        input.descricao?.trim() || null,
-        input.rendimentoMl,
-        input.margemLucro,
-        id,
-      ],
-    );
-    if (recRes.rowCount === 0) throw new DomainError("Receita não encontrada.");
-
-    await client.query("DELETE FROM receita_item WHERE receita_id = $1", [id]);
-    for (const item of input.itens) {
-      await client.query(
-        `INSERT INTO receita_item (receita_id, insumo_id, quantidade)
-         VALUES ($1, $2, $3)`,
-        [id, item.insumoId, item.quantidade],
-      );
-    }
-    await client.query("COMMIT");
-    const rec = recRes.rows[0];
-    return {
-      id: Number(rec.id),
-      nome: rec.nome,
-      descricao: rec.descricao ?? null,
-      rendimentoMl: Number(rec.rendimento_ml),
-      margemLucro: Number(rec.margem_lucro),
-      dataAtualizacao: new Date(rec.data_atualizacao).toISOString(),
-    };
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+export async function updateReceita(id: number, input: ReceitaInput): Promise<Receita> {
+  const db = await getDb();
+  await assertInsumosAtivos(db, input.itens.map((it) => it.insumoId));
+  const row = await db.transaction(async (tx) => {
+    const [rec] = await tx
+      .update(t.receita)
+      .set({ ...valoresReceita(input), dataAtualizacao: new Date() })
+      .where(eq(t.receita.id, id))
+      .returning();
+    if (!rec) throw new DomainError("Receita não encontrada.");
+    await tx.delete(t.receitaItem).where(eq(t.receitaItem.receitaId, id));
+    await tx
+      .insert(t.receitaItem)
+      .values(input.itens.map((it) => ({ receitaId: id, insumoId: it.insumoId, quantidade: it.quantidade })));
+    return rec;
+  });
+  return mapReceita(row);
 }
 
 export async function deleteReceita(id: number): Promise<void> {
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    if (!db.receitas.some((r) => r.id === id)) throw new DomainError("Receita não encontrada.");
-    const emUso = db.ordensProducao.some((op) => op.receitaId === id);
-    if (emUso) {
-      throw new DomainError(
-        "Esta receita possui ordens de produção vinculadas e não pode ser excluída.",
-      );
-    }
-    db.receitas = db.receitas.filter((r) => r.id !== id);
-    db.receitaItens = db.receitaItens.filter((ri) => ri.receitaId !== id);
-    writeLocalDb(db);
-    return;
+  const db = await getDb();
+  const emUso = await db
+    .select({ id: t.ordemProducao.id })
+    .from(t.ordemProducao)
+    .where(eq(t.ordemProducao.receitaId, id))
+    .limit(1);
+  if (emUso.length) {
+    throw new DomainError("Esta receita possui ordens de produção vinculadas e não pode ser excluída.");
   }
-
-  const check = await getPool().query(
-    "SELECT 1 FROM ordem_producao WHERE receita_id = $1 LIMIT 1",
-    [id],
-  );
-  if (check.rowCount && check.rowCount > 0) {
-    throw new DomainError(
-      "Esta receita possui ordens de produção vinculadas e não pode ser excluída.",
-    );
-  }
-  const res = await getPool().query("DELETE FROM receita WHERE id = $1", [id]);
-  if (!res.rowCount) throw new DomainError("Receita não encontrada.");
+  // Os itens da receita saem junto (ON DELETE CASCADE).
+  const res = await db.delete(t.receita).where(eq(t.receita.id, id)).returning({ id: t.receita.id });
+  if (!res.length) throw new DomainError("Receita não encontrada.");
 }
 
 // ============================================================================
@@ -1084,13 +676,10 @@ export async function createOrdemProducao(input: {
   if (!forma) throw new DomainError("Forma não encontrada.");
 
   const calc = calcularNecessidadesOrdem(receita, forma, input.quantidadeUnidades);
-  const now = new Date().toISOString();
-  const dataPrevista = normalizarDataPrevista(input.dataPrevista);
-
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const op: OrdemProducao = {
-      id: db.nextIds.ordemProducao++,
+  const db = await getDb();
+  const [r] = await db
+    .insert(t.ordemProducao)
+    .values({
       receitaId: input.receitaId,
       formaId: input.formaId,
       quantidadeUnidades: input.quantidadeUnidades,
@@ -1098,46 +687,10 @@ export async function createOrdemProducao(input: {
       custoTotalEstimado: calc.custoTotalEstimado,
       precoVendaUnitario: input.precoVendaUnitario ?? null,
       observacao: input.observacao?.trim() || null,
-      dataPrevista,
-      dataCriacao: now,
-      dataConclusao: null,
-    };
-    db.ordensProducao.push(op);
-    writeLocalDb(db);
-    return op;
-  }
-
-  const res = await getPool().query(
-    `INSERT INTO ordem_producao (receita_id, forma_id, quantidade_unidades, status, custo_total_estimado, preco_venda_unitario, observacao, data_prevista)
-     VALUES ($1, $2, $3, 'PLANEJADA', $4, $5, $6, $7)
-     RETURNING id, receita_id, forma_id, quantidade_unidades, status, custo_total_estimado, preco_venda_unitario, observacao, data_prevista, data_criacao, data_conclusao`,
-    [
-      input.receitaId,
-      input.formaId,
-      input.quantidadeUnidades,
-      calc.custoTotalEstimado,
-      input.precoVendaUnitario ?? null,
-      input.observacao?.trim() || null,
-      dataPrevista,
-    ],
-  );
-  const r = res.rows[0];
-  return {
-    id: Number(r.id),
-    receitaId: Number(r.receita_id),
-    formaId: Number(r.forma_id),
-    quantidadeUnidades: Number(r.quantidade_unidades),
-    status: r.status as StatusOrdemProducao,
-    custoTotalEstimado: Number(r.custo_total_estimado),
-    precoVendaUnitario:
-      r.preco_venda_unitario != null ? Number(r.preco_venda_unitario) : null,
-    observacao: r.observacao ?? null,
-    dataPrevista: new Date(r.data_prevista).toISOString(),
-    dataCriacao: new Date(r.data_criacao).toISOString(),
-    dataConclusao: r.data_conclusao
-      ? new Date(r.data_conclusao).toISOString()
-      : null,
-  };
+      dataPrevista: normalizarDataPrevista(input.dataPrevista),
+    })
+    .returning();
+  return mapOrdem(r);
 }
 
 export async function updateOrdemProducaoStatus(
@@ -1153,132 +706,59 @@ export async function updateOrdemProducaoStatus(
   const erroTransicao = validarTransicaoStatus(statusLido, novoStatus);
   if (erroTransicao) throw new DomainError(erroTransicao);
 
-  if (
-    novoStatus === "CONCLUIDA" &&
-    !ordem.estoqueSuficiente &&
-    !permitirEstoqueNegativo
-  ) {
+  if (novoStatus === "CONCLUIDA" && !ordem.estoqueSuficiente && !permitirEstoqueNegativo) {
     throw new DomainError(
       "Estoque insuficiente para concluir esta ordem. Reponha os insumos faltantes ou confirme a baixa forçada.",
     );
   }
 
-  const now = new Date().toISOString();
-
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const target = db.ordensProducao.find((o) => o.id === id);
-    if (!target) throw new DomainError("Ordem de produção não encontrada.");
-    // Releitura dentro do trecho síncrono (sem await até a gravação): se outra
-    // requisição mudou o status nesse meio tempo, nada é baixado em dobro.
-    if (target.status !== statusLido) throw new DomainError(MSG_ORDEM_ALTERADA);
-
-    target.status = novoStatus;
-    if (novoStatus === "CONCLUIDA") {
-      target.dataConclusao = now;
-      target.custoTotalEstimado = ordem.custoTotalEstimado;
-
-      // Dá baixa automática no estoque de todos os insumos e formas consumidos!
-      for (const nec of ordem.necessidades) {
-        if (nec.quantidadeNecessaria > 0) {
-          db.movimentos.push({
-            id: db.nextIds.movimento++,
-            insumoId: nec.insumoId,
-            quantidade: nec.quantidadeNecessaria,
-            tipo: "PRODUCAO",
-            custoUnitario: nec.custoUnitario,
-            dataMovimento: now,
-            dataRegistro: now,
-            observacao: `Baixa automática — OP #${ordem.id} (${ordem.quantidadeUnidades}x ${ordem.formaNome})`,
-          });
-        }
-      }
-    }
-
-    writeLocalDb(db);
-    return target;
-  }
-
-  const client = await getPool().connect();
-  try {
-    await client.query("BEGIN");
+  const db = await getDb();
+  const row = await db.transaction(async (tx) => {
+    const concluir = novoStatus === "CONCLUIDA";
     // Atualização condicional: só muda se o status ainda for o que lemos.
     // Duas requisições simultâneas para concluir a mesma ordem → só uma vence.
-    const res = await client.query(
-      `UPDATE ordem_producao
-       SET status = $1::varchar,
-           custo_total_estimado = CASE WHEN $1::varchar = 'CONCLUIDA' THEN $2 ELSE custo_total_estimado END,
-           data_conclusao = CASE WHEN $1::varchar = 'CONCLUIDA' THEN NOW() ELSE data_conclusao END
-       WHERE id = $3 AND status = $4
-       RETURNING id, receita_id, forma_id, quantidade_unidades, status, custo_total_estimado, preco_venda_unitario, observacao, data_prevista, data_criacao, data_conclusao`,
-      [novoStatus, ordem.custoTotalEstimado, id, statusLido],
-    );
-    if (res.rowCount === 0) throw new DomainError(MSG_ORDEM_ALTERADA);
+    const [atualizada] = await tx
+      .update(t.ordemProducao)
+      .set(
+        concluir
+          ? { status: novoStatus, custoTotalEstimado: ordem.custoTotalEstimado, dataConclusao: new Date() }
+          : { status: novoStatus },
+      )
+      .where(and(eq(t.ordemProducao.id, id), eq(t.ordemProducao.status, statusLido)))
+      .returning();
+    if (!atualizada) throw new DomainError(MSG_ORDEM_ALTERADA);
 
-    if (novoStatus === "CONCLUIDA") {
-      for (const nec of ordem.necessidades) {
-        if (nec.quantidadeNecessaria > 0) {
-          await client.query(
-            `INSERT INTO movimento_estoque (quantidade, tipo, custo_unitario, observacao, insumo_id)
-             VALUES ($1, 'PRODUCAO', $2, $3, $4)`,
-            [
-              nec.quantidadeNecessaria,
-              nec.custoUnitario,
-              `Baixa automática — OP #${ordem.id} (${ordem.quantidadeUnidades}x ${ordem.formaNome})`,
-              nec.insumoId,
-            ],
-          );
-        }
-      }
+    if (concluir) {
+      const baixas = ordem.necessidades
+        .filter((nec) => nec.quantidadeNecessaria > 0)
+        .map((nec) => ({
+          quantidade: nec.quantidadeNecessaria,
+          tipo: "PRODUCAO" as const,
+          custoUnitario: nec.custoUnitario,
+          observacao: `Baixa automática — OP #${ordem.id} (${ordem.quantidadeUnidades}x ${ordem.formaNome})`,
+          insumoId: nec.insumoId,
+        }));
+      if (baixas.length) await tx.insert(t.movimentoEstoque).values(baixas);
     }
-
-    await client.query("COMMIT");
-    const r = res.rows[0];
-    return {
-      id: Number(r.id),
-      receitaId: Number(r.receita_id),
-      formaId: Number(r.forma_id),
-      quantidadeUnidades: Number(r.quantidade_unidades),
-      status: r.status as StatusOrdemProducao,
-      custoTotalEstimado: Number(r.custo_total_estimado),
-      precoVendaUnitario:
-        r.preco_venda_unitario != null ? Number(r.preco_venda_unitario) : null,
-      observacao: r.observacao ?? null,
-      dataPrevista: new Date(r.data_prevista).toISOString(),
-      dataCriacao: new Date(r.data_criacao).toISOString(),
-      dataConclusao: r.data_conclusao
-        ? new Date(r.data_conclusao).toISOString()
-        : null,
-    };
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+    return atualizada;
+  });
+  return mapOrdem(row);
 }
 
 export async function deleteOrdemProducao(id: number): Promise<void> {
-  if (!hasDatabaseUrl()) {
-    const db = readLocalDb();
-    const target = db.ordensProducao.find((o) => o.id === id);
-    if (!target) throw new DomainError("Ordem de produção não encontrada.");
-    if (target.status === "CONCLUIDA") {
-      throw new DomainError("Não é possível excluir uma ordem já concluída.");
-    }
-    db.ordensProducao = db.ordensProducao.filter((o) => o.id !== id);
-    writeLocalDb(db);
-    return;
-  }
-
+  const db = await getDb();
   // Exclusão condicional: se a ordem for concluída no mesmo instante, não apaga.
-  const res = await getPool().query(
-    "DELETE FROM ordem_producao WHERE id = $1 AND status <> 'CONCLUIDA'",
-    [id],
-  );
-  if (!res.rowCount) {
-    const check = await getPool().query("SELECT status FROM ordem_producao WHERE id = $1", [id]);
-    if (!check.rowCount) throw new DomainError("Ordem de produção não encontrada.");
+  const res = await db
+    .delete(t.ordemProducao)
+    .where(and(eq(t.ordemProducao.id, id), ne(t.ordemProducao.status, "CONCLUIDA")))
+    .returning({ id: t.ordemProducao.id });
+  if (!res.length) {
+    const existe = await db
+      .select({ id: t.ordemProducao.id })
+      .from(t.ordemProducao)
+      .where(eq(t.ordemProducao.id, id))
+      .limit(1);
+    if (!existe.length) throw new DomainError("Ordem de produção não encontrada.");
     throw new DomainError("Não é possível excluir uma ordem já concluída.");
   }
 }
