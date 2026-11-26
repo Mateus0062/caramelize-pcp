@@ -25,6 +25,10 @@ import type {
 interface EstoqueFormasViewProps {
   insumos: InsumoComDetalhes[];
   movimentos: MovimentoComDetalhes[];
+  /** Total de movimentos no banco (a lista traz só os mais recentes). */
+  totalMovimentos: number;
+  carregandoMovimentos: boolean;
+  onLoadMoreMovimentos: () => Promise<void>;
   formas: FormaComDetalhes[];
   isAdmin: boolean;
   onRefresh: () => Promise<void>;
@@ -34,6 +38,9 @@ interface EstoqueFormasViewProps {
 export function EstoqueFormasView({
   insumos,
   movimentos,
+  totalMovimentos,
+  carregandoMovimentos,
+  onLoadMoreMovimentos,
   formas,
   isAdmin,
   onRefresh,
@@ -168,7 +175,7 @@ export function EstoqueFormasView({
                 : "text-cacau hover:bg-caramelo-50"
             }`}
           >
-            Movimentações ({movimentos.length})
+            Movimentações ({totalMovimentos})
           </button>
           <button
             type="button"
@@ -359,6 +366,21 @@ export function EstoqueFormasView({
                 </tbody>
               </table>
             </div>
+            {movimentos.length < totalMovimentos && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-2 px-5 py-3.5 border-t border-caramelo-100 text-xs text-cacau-suave">
+                <span>
+                  Mostrando os {movimentos.length} mais recentes de {totalMovimentos}.
+                </span>
+                <button
+                  type="button"
+                  disabled={carregandoMovimentos}
+                  onClick={() => void onLoadMoreMovimentos()}
+                  className="px-3.5 py-2 rounded-xl border border-caramelo-200 bg-creme-claro font-semibold text-cacau hover:bg-caramelo-50 transition cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                >
+                  {carregandoMovimentos ? "Carregando..." : "Carregar mais"}
+                </button>
+              </div>
+            )}
           </section>
         </div>
       ) : (

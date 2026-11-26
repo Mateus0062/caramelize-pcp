@@ -53,9 +53,16 @@ export function ordemAtiva(status: StatusOrdemProducao): boolean {
   return status === "PLANEJADA" || status === "EM_PRODUCAO";
 }
 
+/** Saldo atual por insumo (id do insumo → quantidade em estoque). */
+export type SaldosMap = Map<number, number>;
+
+/**
+ * Soma entradas e saídas. No Postgres o saldo é calculado pelo próprio banco
+ * (SUM ... GROUP BY); esta função é usada no modo local.
+ */
 export function calcularSaldosMap(
   movimentos: MovimentoEstoque[],
-): Map<number, number> {
+): SaldosMap {
   const saldos = new Map<number, number>();
   for (const m of movimentos) {
     const atual = saldos.get(m.insumoId) ?? 0;
@@ -71,10 +78,9 @@ export function calcularSaldosMap(
 export function enriquecerInsumos(
   insumos: Insumo[],
   categorias: Categoria[],
-  movimentos: MovimentoEstoque[],
+  saldos: SaldosMap,
 ): InsumoComDetalhes[] {
   const catMap = new Map(categorias.map((c) => [c.id, c.nome]));
-  const saldos = calcularSaldosMap(movimentos);
 
   return insumos
     .filter((i) => i.ativo)
@@ -101,7 +107,8 @@ export function enriquecerMovimentos(
   return [...movimentos]
     .sort(
       (a, b) =>
-        new Date(b.dataMovimento).getTime() - new Date(a.dataMovimento).getTime(),
+        new Date(b.dataMovimento).getTime() - new Date(a.dataMovimento).getTime() ||
+        b.id - a.id,
     )
     .map((m) => {
       const ins = insumoMap.get(m.insumoId);
@@ -116,10 +123,9 @@ export function enriquecerMovimentos(
 export function enriquecerFormas(
   formas: Forma[],
   insumos: Insumo[],
-  movimentos: MovimentoEstoque[],
+  saldos: SaldosMap,
 ): FormaComDetalhes[] {
   const insumoMap = new Map(insumos.map((i) => [i.id, i]));
-  const saldos = calcularSaldosMap(movimentos);
 
   return formas
     .map((f) => {
@@ -148,17 +154,20 @@ export function enriquecerReceitas(
   receitas: Receita[],
   receitaItens: ReceitaItem[],
   insumos: Insumo[],
-  formas: Forma[],
-  movimentos: MovimentoEstoque[],
+  formasDet: FormaComDetalhes[],
+  saldos: SaldosMap,
 ): ReceitaComDetalhes[] {
   const insumoMap = new Map(insumos.map((i) => [i.id, i]));
-  const saldos = calcularSaldosMap(movimentos);
-  const formasDet = enriquecerFormas(formas, insumos, movimentos);
+  const itensPorReceita = new Map<number, ReceitaItem[]>();
+  for (const it of receitaItens) {
+    const lista = itensPorReceita.get(it.receitaId);
+    if (lista) lista.push(it);
+    else itensPorReceita.set(it.receitaId, [it]);
+  }
 
   return receitas
     .map((r) => {
-      const itens: ReceitaItemComDetalhes[] = receitaItens
-        .filter((it) => it.receitaId === r.id)
+      const itens: ReceitaItemComDetalhes[] = (itensPorReceita.get(r.id) ?? [])
         .map((it) => {
           const ins = insumoMap.get(it.insumoId);
           const custoUnitario = ins?.custoUnitario ?? 0;

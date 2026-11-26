@@ -38,6 +38,8 @@ export default function HomePage() {
   const [categorias, setCategorias] = useState<Categoria[]>([]);
   const [insumos, setInsumos] = useState<InsumoComDetalhes[]>([]);
   const [movimentos, setMovimentos] = useState<MovimentoComDetalhes[]>([]);
+  const [totalMovimentos, setTotalMovimentos] = useState(0);
+  const [carregandoMovimentos, setCarregandoMovimentos] = useState(false);
   const [formas, setFormas] = useState<FormaComDetalhes[]>([]);
   const [receitas, setReceitas] = useState<ReceitaComDetalhes[]>([]);
   const [ordens, setOrdens] = useState<OrdemProducaoComDetalhes[]>([]);
@@ -54,56 +56,38 @@ export default function HomePage() {
 
   const loadAll = useCallback(async () => {
     try {
-      const meRes = await fetch("/api/auth/me", { cache: "no-store" });
-      if (meRes.status === 401) {
+      // Uma única requisição traz tudo (antes eram 8, e cada uma relia o banco inteiro).
+      const res = await fetch("/api/pcp", { cache: "no-store" });
+      if (res.status === 401) {
         router.replace("/login");
         return;
       }
-      if (meRes.ok) {
-        const meData = await meRes.json();
-        setUser(meData.user ?? null);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(data?.error || "Falha ao carregar dados do PCP");
       }
 
-      const endpoints = [
-        "/api/dashboard",
-        "/api/categorias",
-        "/api/insumos",
-        "/api/movimentos",
-        "/api/formas",
-        "/api/receitas",
-        "/api/ordens",
+      const listas = [
+        data?.categorias,
+        data?.insumos,
+        data?.movimentos,
+        data?.formas,
+        data?.receitas,
+        data?.ordens,
       ];
-      const responses = await Promise.all(
-        endpoints.map((url) => fetch(url, { cache: "no-store" })),
-      );
-
-      // Confere TODAS as respostas antes de usar qualquer uma: se uma falhar,
-      // a tela mostra o erro em vez de quebrar tentando listar um objeto de erro.
-      if (responses.some((res) => res.status === 401)) {
-        router.replace("/login");
-        return;
-      }
-      const failed = responses.find((res) => !res.ok);
-      if (failed) {
-        const errBody = await failed.json().catch(() => ({}));
-        throw new Error(errBody.error || "Falha ao carregar dados do PCP");
-      }
-
-      const [dash, cats, ins, movs, fms, recs, ops] = await Promise.all(
-        responses.map((res) => res.json()),
-      );
-      const listas = [cats, ins, movs, fms, recs, ops];
-      if (!dash || typeof dash !== "object" || listas.some((l) => !Array.isArray(l))) {
+      if (!data?.dashboard || listas.some((l) => !Array.isArray(l))) {
         throw new Error("Resposta inesperada do servidor ao carregar os dados.");
       }
 
-      setDashboard(dash);
-      setCategorias(cats);
-      setInsumos(ins);
-      setMovimentos(movs);
-      setFormas(fms);
-      setReceitas(recs);
-      setOrdens(ops);
+      setUser(data.user ?? null);
+      setDashboard(data.dashboard);
+      setCategorias(data.categorias);
+      setInsumos(data.insumos);
+      setMovimentos(data.movimentos);
+      setTotalMovimentos(Number(data.totalMovimentos ?? data.movimentos.length));
+      setFormas(data.formas);
+      setReceitas(data.receitas);
+      setOrdens(data.ordens);
       setError(null);
     } catch (err) {
       setError(
@@ -113,6 +97,30 @@ export default function HomePage() {
       setLoading(false);
     }
   }, [router]);
+
+  /** Busca a próxima página do histórico de movimentos. */
+  const loadMoreMovimentos = useCallback(async () => {
+    setCarregandoMovimentos(true);
+    try {
+      const res = await fetch(
+        `/api/movimentos?limite=200&deslocamento=${movimentos.length}`,
+        { cache: "no-store" },
+      );
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !Array.isArray(data)) {
+        throw new Error(data?.error || "Erro ao carregar mais movimentos");
+      }
+      setMovimentos((prev) => {
+        // Evita duplicados caso um movimento novo tenha deslocado a paginação.
+        const ids = new Set(prev.map((m) => m.id));
+        return [...prev, ...(data as MovimentoComDetalhes[]).filter((m) => !ids.has(m.id))];
+      });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Erro ao carregar movimentos", "error");
+    } finally {
+      setCarregandoMovimentos(false);
+    }
+  }, [movimentos.length, showToast]);
 
   const handleLogout = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -211,6 +219,9 @@ export default function HomePage() {
         <EstoqueFormasView
           insumos={insumos}
           movimentos={movimentos}
+          totalMovimentos={totalMovimentos}
+          carregandoMovimentos={carregandoMovimentos}
+          onLoadMoreMovimentos={loadMoreMovimentos}
           formas={formas}
           isAdmin={isAdmin}
           onRefresh={loadAll}

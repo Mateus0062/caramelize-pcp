@@ -34,7 +34,8 @@ Se `DATABASE_URL` estiver vazia, o sistema usa o **Modo Local** (somente para de
 2. Baixe o certificado da CA do Supabase (**Project Settings → Database → SSL Configuration**), salve em `certs/supabase-ca.crt` e defina `DATABASE_SSL_CA_FILE`. O certificado do banco é sempre verificado.
 3. Preencha `DATABASE_URL` no `.env.local` e reinicie o servidor.
 4. Recomendado: crie o usuário `caramelize_app` com acesso mínimo (Parte 2 de `supabase/seguranca.sql`) e use-o na `DATABASE_URL` em vez de `postgres`.
-5. Opcional: execute [`supabase/migracao-timestamptz.sql`](supabase/migracao-timestamptz.sql) para converter as colunas de data/hora para `TIMESTAMPTZ`. Sem ela o sistema já funciona: as colunas `TIMESTAMP` são lidas como UTC (fuso padrão do Supabase).
+5. Execute [`supabase/indices.sql`](supabase/indices.sql) para criar os índices de desempenho (bancos novos já os recebem pelo `schema.sql`).
+6. Opcional: execute [`supabase/migracao-timestamptz.sql`](supabase/migracao-timestamptz.sql) para converter as colunas de data/hora para `TIMESTAMPTZ`. Sem ela o sistema já funciona: as colunas `TIMESTAMP` são lidas como UTC (fuso padrão do Supabase).
 
 ## Ordens de Produção
 

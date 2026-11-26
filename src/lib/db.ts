@@ -13,6 +13,7 @@ import {
   enriquecerReceitas,
   montarDashboardResumo,
   validarTransicaoStatus,
+  type SaldosMap,
 } from "./pcp-engine";
 import { getPool, hasDatabaseUrl, withTransaction } from "./pg";
 import { createSeedData, type LocalDbSchema } from "./seed";
@@ -82,49 +83,125 @@ function writeLocalDb(db: LocalDbSchema): void {
   writeJsonAtomic(DATA_FILE, db);
 }
 
-async function loadAllData(): Promise<{
+// ============================================================================
+// LEITURA (snapshot)
+// ============================================================================
+
+/** Quantos movimentos recentes a tela carrega de início (o resto vem paginado). */
+export const MOVIMENTOS_POR_PAGINA = 200;
+
+interface Snapshot {
   categorias: Categoria[];
   insumos: Insumo[];
-  movimentos: MovimentoEstoque[];
   formas: Forma[];
   receitas: Receita[];
   receitaItens: ReceitaItem[];
   ordensProducao: OrdemProducao[];
-}> {
+  /** Saldo por insumo, somado pelo banco (não é preciso trazer os movimentos). */
+  saldos: SaldosMap;
+  /** Somente os N movimentos mais recentes (N = limiteMovimentos). */
+  movimentosRecentes: MovimentoEstoque[];
+  totalMovimentos: number;
+}
+
+const MOVIMENTO_COLUMNS =
+  "id, quantidade, tipo, custo_unitario, data_movimento, data_registro, observacao, insumo_id";
+
+function mapMovimentoRow(r: Record<string, unknown>): MovimentoEstoque {
+  return {
+    id: Number(r.id),
+    quantidade: Number(r.quantidade),
+    tipo: r.tipo as TipoMovimento,
+    custoUnitario: r.custo_unitario != null ? Number(r.custo_unitario) : null,
+    dataMovimento: new Date(r.data_movimento as string).toISOString(),
+    dataRegistro: new Date(r.data_registro as string).toISOString(),
+    observacao: (r.observacao as string | null) ?? null,
+    insumoId: Number(r.insumo_id),
+  };
+}
+
+function mapInsumoRow(r: Record<string, unknown>): Insumo {
+  return {
+    id: Number(r.id),
+    nome: r.nome as string,
+    unidadeMedida: r.unidade_medida as string,
+    estoqueMinimo: Number(r.estoque_minimo ?? 0),
+    custoUnitario: Number(r.custo_unitario ?? 0),
+    dataAtualizacao: new Date(r.data_atualizacao as string).toISOString(),
+    categoriaId: Number(r.categoria_id),
+    ativo: Boolean(r.ativo),
+  };
+}
+
+const INSUMO_COLUMNS =
+  "id, nome, unidade_medida, estoque_minimo, custo_unitario, data_atualizacao, categoria_id, ativo";
+
+function ordenarMovimentosRecentes(movimentos: MovimentoEstoque[]): MovimentoEstoque[] {
+  return [...movimentos].sort(
+    (a, b) =>
+      new Date(b.dataMovimento).getTime() - new Date(a.dataMovimento).getTime() || b.id - a.id,
+  );
+}
+
+/**
+ * Carrega cadastros, saldos e (opcionalmente) os movimentos mais recentes.
+ * No Postgres são 7 a 8 consultas em paralelo, e o histórico de movimentos
+ * NÃO é transferido inteiro: o banco devolve só o saldo de cada insumo.
+ */
+async function loadSnapshot(limiteMovimentos = 0): Promise<Snapshot> {
   if (!hasDatabaseUrl()) {
     const local = readLocalDb();
     return {
       categorias: local.categorias,
       insumos: local.insumos,
-      movimentos: local.movimentos,
       formas: local.formas,
       receitas: local.receitas,
       receitaItens: local.receitaItens,
       ordensProducao: local.ordensProducao,
+      saldos: calcularSaldosMap(local.movimentos),
+      movimentosRecentes:
+        limiteMovimentos > 0
+          ? ordenarMovimentosRecentes(local.movimentos).slice(0, limiteMovimentos)
+          : [],
+      totalMovimentos: local.movimentos.length,
     };
   }
 
   const pool = getPool();
-  const [catRes, insRes, movRes, formRes, recRes, itemRes, opRes] =
-    await Promise.all([
-      pool.query("SELECT id, nome, data_atualizacao FROM categoria ORDER BY nome"),
-      pool.query(
-        "SELECT id, nome, unidade_medida, estoque_minimo, custo_unitario, data_atualizacao, categoria_id, ativo FROM insumo",
-      ),
-      pool.query(
-        "SELECT id, quantidade, tipo, custo_unitario, data_movimento, data_registro, observacao, insumo_id FROM movimento_estoque",
-      ),
-      pool.query("SELECT id, nome, volume_ml, insumo_id FROM forma"),
-      pool.query(
-        "SELECT id, nome, descricao, rendimento_ml, margem_lucro, data_atualizacao FROM receita",
-      ),
-      pool.query(
-        "SELECT id, receita_id, insumo_id, quantidade FROM receita_item",
-      ),
-      pool.query(
-        "SELECT id, receita_id, forma_id, quantidade_unidades, status, custo_total_estimado, preco_venda_unitario, observacao, data_prevista, data_criacao, data_conclusao FROM ordem_producao",
-      ),
-    ]);
+  const [catRes, insRes, formRes, recRes, itemRes, opRes, saldoRes, movRes] = await Promise.all([
+    pool.query("SELECT id, nome, data_atualizacao FROM categoria ORDER BY nome"),
+    pool.query(`SELECT ${INSUMO_COLUMNS} FROM insumo`),
+    pool.query("SELECT id, nome, volume_ml, insumo_id FROM forma"),
+    pool.query(
+      "SELECT id, nome, descricao, rendimento_ml, margem_lucro, data_atualizacao FROM receita",
+    ),
+    pool.query("SELECT id, receita_id, insumo_id, quantidade FROM receita_item"),
+    pool.query(
+      "SELECT id, receita_id, forma_id, quantidade_unidades, status, custo_total_estimado, preco_venda_unitario, observacao, data_prevista, data_criacao, data_conclusao FROM ordem_producao",
+    ),
+    pool.query(
+      `SELECT insumo_id,
+              SUM(CASE WHEN tipo IN ('COMPRA', 'AJUSTE_ENTRADA') THEN quantidade ELSE -quantidade END) AS saldo,
+              COUNT(*)::int AS qtd
+       FROM movimento_estoque
+       GROUP BY insumo_id`,
+    ),
+    limiteMovimentos > 0
+      ? pool.query(
+          `SELECT ${MOVIMENTO_COLUMNS} FROM movimento_estoque
+           ORDER BY data_movimento DESC, id DESC
+           LIMIT $1`,
+          [limiteMovimentos],
+        )
+      : Promise.resolve({ rows: [] as Record<string, unknown>[] }),
+  ]);
+
+  const saldos: SaldosMap = new Map();
+  let totalMovimentos = 0;
+  for (const r of saldoRes.rows) {
+    saldos.set(Number(r.insumo_id), Number(r.saldo));
+    totalMovimentos += Number(r.qtd);
+  }
 
   return {
     categorias: catRes.rows.map((r) => ({
@@ -132,26 +209,7 @@ async function loadAllData(): Promise<{
       nome: r.nome,
       dataAtualizacao: new Date(r.data_atualizacao).toISOString(),
     })),
-    insumos: insRes.rows.map((r) => ({
-      id: Number(r.id),
-      nome: r.nome,
-      unidadeMedida: r.unidade_medida,
-      estoqueMinimo: Number(r.estoque_minimo ?? 0),
-      custoUnitario: Number(r.custo_unitario ?? 0),
-      dataAtualizacao: new Date(r.data_atualizacao).toISOString(),
-      categoriaId: Number(r.categoria_id),
-      ativo: Boolean(r.ativo),
-    })),
-    movimentos: movRes.rows.map((r) => ({
-      id: Number(r.id),
-      quantidade: Number(r.quantidade),
-      tipo: r.tipo as TipoMovimento,
-      custoUnitario: r.custo_unitario != null ? Number(r.custo_unitario) : null,
-      dataMovimento: new Date(r.data_movimento).toISOString(),
-      dataRegistro: new Date(r.data_registro).toISOString(),
-      observacao: r.observacao ?? null,
-      insumoId: Number(r.insumo_id),
-    })),
+    insumos: insRes.rows.map(mapInsumoRow),
     formas: formRes.rows.map((r) => ({
       id: Number(r.id),
       nome: r.nome ?? "",
@@ -184,42 +242,88 @@ async function loadAllData(): Promise<{
       observacao: r.observacao ?? null,
       dataPrevista: new Date(r.data_prevista).toISOString(),
       dataCriacao: new Date(r.data_criacao).toISOString(),
-      dataConclusao: r.data_conclusao
-        ? new Date(r.data_conclusao).toISOString()
-        : null,
+      dataConclusao: r.data_conclusao ? new Date(r.data_conclusao).toISOString() : null,
     })),
+    saldos,
+    movimentosRecentes: movRes.rows.map(mapMovimentoRow),
+    totalMovimentos,
   };
 }
 
-// ============================================================================
-// DASHBOARD
-// ============================================================================
-export async function getDashboard(): Promise<DashboardResumo> {
-  const data = await loadAllData();
-  const insumosDet = enriquecerInsumos(
-    data.insumos,
-    data.categorias,
-    data.movimentos,
-  );
-  const movimentosDet = enriquecerMovimentos(data.movimentos, data.insumos);
-  const formasDet = enriquecerFormas(data.formas, data.insumos, data.movimentos);
+/** Calcula formas, receitas e ordens detalhadas uma única vez por snapshot. */
+function detalhar(s: Snapshot) {
+  const formasDet = enriquecerFormas(s.formas, s.insumos, s.saldos);
   const receitasDet = enriquecerReceitas(
-    data.receitas,
-    data.receitaItens,
-    data.insumos,
-    data.formas,
-    data.movimentos,
+    s.receitas,
+    s.receitaItens,
+    s.insumos,
+    formasDet,
+    s.saldos,
   );
-  const ordensDet = enriquecerOrdens(data.ordensProducao, receitasDet, formasDet);
+  const ordensDet = enriquecerOrdens(s.ordensProducao, receitasDet, formasDet);
+  return { formasDet, receitasDet, ordensDet };
+}
 
+function ordenarCategorias(categorias: Categoria[]): Categoria[] {
+  return [...categorias].sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+}
+
+// ============================================================================
+// DASHBOARD E CARGA COMPLETA DA TELA
+// ============================================================================
+function montarDashboard(
+  s: Snapshot,
+  insumosDet: InsumoComDetalhes[],
+  movimentosDet: MovimentoComDetalhes[],
+  det: ReturnType<typeof detalhar>,
+): DashboardResumo {
   return montarDashboardResumo({
     storageMode: getStorageMode(),
     insumosDet,
     movimentosDet,
-    receitasDet,
-    formasDet,
-    ordensDet,
+    receitasDet: det.receitasDet,
+    formasDet: det.formasDet,
+    ordensDet: det.ordensDet,
   });
+}
+
+export async function getDashboard(): Promise<DashboardResumo> {
+  const s = await loadSnapshot(8);
+  const insumosDet = enriquecerInsumos(s.insumos, s.categorias, s.saldos);
+  const movimentosDet = enriquecerMovimentos(s.movimentosRecentes, s.insumos);
+  return montarDashboard(s, insumosDet, movimentosDet, detalhar(s));
+}
+
+export interface PainelCompleto {
+  dashboard: DashboardResumo;
+  categorias: Categoria[];
+  insumos: InsumoComDetalhes[];
+  movimentos: MovimentoComDetalhes[];
+  totalMovimentos: number;
+  formas: FormaComDetalhes[];
+  receitas: ReceitaComDetalhes[];
+  ordens: OrdemProducaoComDetalhes[];
+}
+
+/**
+ * Tudo o que a tela principal precisa, numa única leitura do banco.
+ * Substitui as 7 chamadas separadas (cada uma relia o banco inteiro).
+ */
+export async function getPainelCompleto(): Promise<PainelCompleto> {
+  const s = await loadSnapshot(MOVIMENTOS_POR_PAGINA);
+  const insumosDet = enriquecerInsumos(s.insumos, s.categorias, s.saldos);
+  const movimentosDet = enriquecerMovimentos(s.movimentosRecentes, s.insumos);
+  const det = detalhar(s);
+  return {
+    dashboard: montarDashboard(s, insumosDet, movimentosDet, det),
+    categorias: ordenarCategorias(s.categorias),
+    insumos: insumosDet,
+    movimentos: movimentosDet,
+    totalMovimentos: s.totalMovimentos,
+    formas: det.formasDet,
+    receitas: det.receitasDet,
+    ordens: det.ordensDet,
+  };
 }
 
 // ============================================================================
@@ -267,8 +371,7 @@ async function assertInsumosAtivos(insumoIds: number[]): Promise<void> {
 // CATEGORIAS
 // ============================================================================
 export async function listCategorias(): Promise<Categoria[]> {
-  const data = await loadAllData();
-  return [...data.categorias].sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+  return ordenarCategorias((await loadSnapshot()).categorias);
 }
 
 export async function createCategoria(nome: string): Promise<Categoria> {
@@ -331,8 +434,8 @@ export async function deleteCategoria(id: number): Promise<void> {
 // INSUMOS
 // ============================================================================
 export async function listInsumos(): Promise<InsumoComDetalhes[]> {
-  const data = await loadAllData();
-  return enriquecerInsumos(data.insumos, data.categorias, data.movimentos);
+  const s = await loadSnapshot();
+  return enriquecerInsumos(s.insumos, s.categorias, s.saldos);
 }
 
 export async function createInsumo(input: {
@@ -541,9 +644,33 @@ export async function deleteInsumo(id: number): Promise<void> {
 // ============================================================================
 // MOVIMENTOS DE ESTOQUE
 // ============================================================================
-export async function listMovimentos(): Promise<MovimentoComDetalhes[]> {
-  const data = await loadAllData();
-  return enriquecerMovimentos(data.movimentos, data.insumos);
+/** Histórico paginado, do mais recente para o mais antigo. */
+export async function listMovimentos(
+  opcoes: { limite?: number; deslocamento?: number } = {},
+): Promise<MovimentoComDetalhes[]> {
+  const limite = Math.min(Math.max(opcoes.limite ?? MOVIMENTOS_POR_PAGINA, 1), 1000);
+  const deslocamento = Math.max(opcoes.deslocamento ?? 0, 0);
+
+  if (!hasDatabaseUrl()) {
+    const local = readLocalDb();
+    const pagina = ordenarMovimentosRecentes(local.movimentos).slice(
+      deslocamento,
+      deslocamento + limite,
+    );
+    return enriquecerMovimentos(pagina, local.insumos);
+  }
+
+  const pool = getPool();
+  const [movRes, insRes] = await Promise.all([
+    pool.query(
+      `SELECT ${MOVIMENTO_COLUMNS} FROM movimento_estoque
+       ORDER BY data_movimento DESC, id DESC
+       LIMIT $1 OFFSET $2`,
+      [limite, deslocamento],
+    ),
+    pool.query(`SELECT ${INSUMO_COLUMNS} FROM insumo`),
+  ]);
+  return enriquecerMovimentos(movRes.rows.map(mapMovimentoRow), insRes.rows.map(mapInsumoRow));
 }
 
 export async function createMovimento(input: {
@@ -661,8 +788,8 @@ export async function createMovimento(input: {
 // FORMAS
 // ============================================================================
 export async function listFormas(): Promise<FormaComDetalhes[]> {
-  const data = await loadAllData();
-  return enriquecerFormas(data.formas, data.insumos, data.movimentos);
+  const s = await loadSnapshot();
+  return enriquecerFormas(s.formas, s.insumos, s.saldos);
 }
 
 export async function createForma(input: {
@@ -745,14 +872,7 @@ export async function deleteForma(id: number): Promise<void> {
 // RECEITAS
 // ============================================================================
 export async function listReceitas(): Promise<ReceitaComDetalhes[]> {
-  const data = await loadAllData();
-  return enriquecerReceitas(
-    data.receitas,
-    data.receitaItens,
-    data.insumos,
-    data.formas,
-    data.movimentos,
-  );
+  return detalhar(await loadSnapshot()).receitasDet;
 }
 
 export async function createReceita(input: {
@@ -946,16 +1066,7 @@ export async function deleteReceita(id: number): Promise<void> {
 // ORDENS DE PRODUÇÃO (PCP)
 // ============================================================================
 export async function listOrdensProducao(): Promise<OrdemProducaoComDetalhes[]> {
-  const data = await loadAllData();
-  const formasDet = enriquecerFormas(data.formas, data.insumos, data.movimentos);
-  const receitasDet = enriquecerReceitas(
-    data.receitas,
-    data.receitaItens,
-    data.insumos,
-    data.formas,
-    data.movimentos,
-  );
-  return enriquecerOrdens(data.ordensProducao, receitasDet, formasDet);
+  return detalhar(await loadSnapshot()).ordensDet;
 }
 
 export async function createOrdemProducao(input: {
@@ -966,15 +1077,7 @@ export async function createOrdemProducao(input: {
   observacao?: string | null;
   dataPrevista?: string;
 }): Promise<OrdemProducao> {
-  const data = await loadAllData();
-  const formasDet = enriquecerFormas(data.formas, data.insumos, data.movimentos);
-  const receitasDet = enriquecerReceitas(
-    data.receitas,
-    data.receitaItens,
-    data.insumos,
-    data.formas,
-    data.movimentos,
-  );
+  const { formasDet, receitasDet } = detalhar(await loadSnapshot());
   const receita = receitasDet.find((r) => r.id === input.receitaId);
   const forma = formasDet.find((f) => f.id === input.formaId);
   if (!receita) throw new DomainError("Receita não encontrada.");
@@ -1042,16 +1145,7 @@ export async function updateOrdemProducaoStatus(
   novoStatus: StatusOrdemProducao,
   permitirEstoqueNegativo = false,
 ): Promise<OrdemProducao> {
-  const data = await loadAllData();
-  const formasDet = enriquecerFormas(data.formas, data.insumos, data.movimentos);
-  const receitasDet = enriquecerReceitas(
-    data.receitas,
-    data.receitaItens,
-    data.insumos,
-    data.formas,
-    data.movimentos,
-  );
-  const ordensDet = enriquecerOrdens(data.ordensProducao, receitasDet, formasDet);
+  const { ordensDet } = detalhar(await loadSnapshot());
   const ordem = ordensDet.find((o) => o.id === id);
   if (!ordem) throw new DomainError("Ordem de produção não encontrada.");
 
